@@ -5,9 +5,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const path = require('path');
+const http = require('http');
+const { Server } = require('socket.io');
 require('dotenv').config();
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(cors());
 app.use(express.json());
@@ -40,7 +44,62 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// --- AUTH ---
+// ==================== SOCKET.IO ====================
+const onlineUsers = new Map(); // userId -> Set of socketIds
+
+io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) return next(new Error('Authentication error'));
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) return next(new Error('Authentication error'));
+        socket.userId = user.id;
+        socket.username = user.username;
+        next();
+    });
+});
+
+function emitToUser(userId, event, data) {
+    const sockets = onlineUsers.get(parseInt(userId));
+    if (sockets) {
+        sockets.forEach(sid => io.to(sid).emit(event, data));
+    }
+}
+
+io.on('connection', (socket) => {
+    const uid = parseInt(socket.userId);
+    if (!onlineUsers.has(uid)) onlineUsers.set(uid, new Set());
+    onlineUsers.get(uid).add(socket.id);
+    io.emit('user_online', { userId: uid });
+
+    socket.on('join_chat', (conversationId) => {
+        socket.join(`chat_${conversationId}`);
+    });
+    socket.on('leave_chat', (conversationId) => {
+        socket.leave(`chat_${conversationId}`);
+    });
+    socket.on('typing', ({ conversationId }) => {
+        socket.to(`chat_${conversationId}`).emit('user_typing', { userId: uid, conversationId });
+    });
+    socket.on('stop_typing', ({ conversationId }) => {
+        socket.to(`chat_${conversationId}`).emit('user_stop_typing', { userId: uid, conversationId });
+    });    socket.on('disconnect', async () => {
+        const set = onlineUsers.get(uid);
+        if (set) {
+            set.delete(socket.id);
+            if (set.size === 0) {
+                onlineUsers.delete(uid);
+                // Update last_active in database
+                try {
+                    await pool.query('UPDATE users SET last_active = NOW() WHERE id = $1', [uid]);
+                } catch (e) { /* ignore */ }
+                const lastActive = new Date().toISOString();
+                io.emit('user_offline', { userId: uid, last_active: lastActive });
+            }
+        }
+    });
+});
+
+// ==================== AUTH ====================
 app.post('/api/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
@@ -63,7 +122,7 @@ app.post('/api/login', async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- POSTS ---
+// ==================== POSTS ====================
 app.post('/api/posts', authenticateToken, upload.array('images', 10), async (req, res) => {
     try {
         const { caption } = req.body;
@@ -82,7 +141,7 @@ app.post('/api/posts', authenticateToken, upload.array('images', 10), async (req
 
 app.get('/api/posts', authenticateToken, async (req, res) => {
     try {
-        const currentUserId = req.user.id;        // Feed: Show posts from people I follow (accepted) OR my own posts
+        const currentUserId = req.user.id;
         const query = `
             SELECT p.id, p.caption, p.created_at, p.user_id, u.username, u.profile_pic,
             COALESCE(JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), '[]') as images,
@@ -141,11 +200,11 @@ app.delete('/api/posts/:id', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- COMMENTS ---
+// ==================== COMMENTS ====================
 app.get('/api/posts/:id/comments', authenticateToken, async (req, res) => {
     try {
         const postId = req.params.id;
-        const userId = req.user.id; 
+        const userId = req.user.id;
         const query = `
             SELECT c.id, c.text, c.created_at, c.user_id, c.is_pinned, u.username, u.profile_pic,
             (SELECT COUNT(*) FROM comment_likes WHERE comment_id = c.id) as like_count,
@@ -185,7 +244,6 @@ app.post('/api/comments/:id/like', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Edit Comment (owner of comment OR owner of post can edit)
 app.put('/api/comments/:id', authenticateToken, async (req, res) => {
     try {
         const commentId = req.params.id;
@@ -222,15 +280,11 @@ app.delete('/api/comments/:id', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- PROFILE, PRIVACY & REQUESTS ---
-
-// Get Profile (With Privacy Check)
+// ==================== PROFILE, PRIVACY & REQUESTS ====================
 app.get('/api/users/:username', authenticateToken, async (req, res) => {
     try {
         const { username } = req.params;
         const currentUserId = req.user.id;
-        
-        // 1. Get User Info & Follow Status
         const userQuery = `
             SELECT u.id, u.username, u.profile_pic, u.is_private,
             (SELECT COUNT(*) FROM follows WHERE following_id = u.id AND status = 'accepted') as followers_count,
@@ -240,15 +294,12 @@ app.get('/api/users/:username', authenticateToken, async (req, res) => {
         `;
         const userRes = await pool.query(userQuery, [currentUserId, username]);
         if (userRes.rows.length === 0) return res.status(404).json({ error: "User not found" });
-        
         const targetUser = userRes.rows[0];
         const isSelf = parseInt(currentUserId) === parseInt(targetUser.id);
         const isFollowing = targetUser.follow_status === 'accepted';
-
-        // 2. Privacy Logic: If private AND not following AND not self -> Hide Posts
         if (targetUser.is_private && !isFollowing && !isSelf) {
             return res.json({ user: targetUser, posts: [], restricted: true });
-        }        // 3. Get Posts (If allowed)
+        }
         const postsQuery = `
             SELECT p.*,
             COALESCE(JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), '[]') as images,
@@ -266,11 +317,9 @@ app.get('/api/users/:username', authenticateToken, async (req, res) => {
         `;
         const postsRes = await pool.query(postsQuery, [currentUserId, targetUser.id]);
         res.json({ user: targetUser, posts: postsRes.rows, restricted: false });
-
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Toggle Privacy
 app.put('/api/users/privacy', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -281,47 +330,43 @@ app.put('/api/users/privacy', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Follow / Unfollow (Updated for Pending)
 app.post('/api/follow/:id', authenticateToken, async (req, res) => {
     try {
         const targetId = req.params.id;
         const followerId = req.user.id;
-        
-        // Check existing
         const check = await pool.query('SELECT * FROM follows WHERE follower_id = $1 AND following_id = $2', [followerId, targetId]);
-        
         if (check.rows.length > 0) {
-            // Unfollow (or un-request)
             await pool.query('DELETE FROM follows WHERE follower_id = $1 AND following_id = $2', [followerId, targetId]);
+            // Notify target about updated notifications
+            emitToUser(targetId, 'notification_update', {});
             res.json({ status: "none" });
         } else {
-            // Check if target is private
             const target = await pool.query('SELECT is_private FROM users WHERE id = $1', [targetId]);
             const isPrivate = target.rows[0].is_private;
             const status = isPrivate ? 'pending' : 'accepted';
-            
             await pool.query('INSERT INTO follows (follower_id, following_id, status) VALUES ($1, $2, $3)', [followerId, targetId, status]);
+            // Notify target about new follow/request
+            emitToUser(targetId, 'notification_update', {});
             res.json({ status: status });
         }
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get Pending Requests (For Heart Icon)
 app.get('/api/requests', authenticateToken, async (req, res) => {
     try {
         const userId = req.user.id;
         const query = `
-            SELECT f.follower_id, u.username, u.profile_pic 
+            SELECT f.follower_id, u.username, u.profile_pic, f.created_at
             FROM follows f 
             JOIN users u ON f.follower_id = u.id 
             WHERE f.following_id = $1 AND f.status = 'pending'
+            ORDER BY f.created_at DESC
         `;
         const result = await pool.query(query, [userId]);
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Accept Request
 app.post('/api/requests/:id/confirm', authenticateToken, async (req, res) => {
     try {
         const followerId = req.params.id;
@@ -331,7 +376,6 @@ app.post('/api/requests/:id/confirm', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Delete Request
 app.post('/api/requests/:id/delete', authenticateToken, async (req, res) => {
     try {
         const followerId = req.params.id;
@@ -341,7 +385,6 @@ app.post('/api/requests/:id/delete', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Remove a follower (removes someone from YOUR followers list)
 app.delete('/api/followers/:id', authenticateToken, async (req, res) => {
     try {
         const followerId = req.params.id;
@@ -351,7 +394,6 @@ app.delete('/api/followers/:id', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Get current user info (for settings)
 app.get('/api/me', authenticateToken, async (req, res) => {
     try {
         const result = await pool.query('SELECT id, username, email, profile_pic, is_private FROM users WHERE id = $1', [req.user.id]);
@@ -360,7 +402,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- MISC (STORIES, AVATAR, SEARCH - UNCHANGED) ---
+// ==================== STORIES, AVATAR, SEARCH ====================
 app.post('/api/stories', authenticateToken, upload.single('image'), async (req, res) => {
     try {
         const imageUrl = `http://localhost:8080/uploads/${req.file.filename}`;
@@ -368,6 +410,7 @@ app.post('/api/stories', authenticateToken, upload.single('image'), async (req, 
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.get('/api/stories', authenticateToken, async (req, res) => {
     try {
         const currentUserId = req.user.id;
@@ -387,6 +430,7 @@ app.get('/api/stories', authenticateToken, async (req, res) => {
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.delete('/api/stories/:id', authenticateToken, async (req, res) => {
     try {
         const storyId = req.params.id;
@@ -397,6 +441,7 @@ app.delete('/api/stories/:id', authenticateToken, async (req, res) => {
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.put('/api/users/avatar', authenticateToken, upload.single('image'), async (req, res) => {
     try {
         const imageUrl = `http://localhost:8080/uploads/${req.file.filename}`;
@@ -404,18 +449,19 @@ app.put('/api/users/avatar', authenticateToken, upload.single('image'), async (r
         res.json({ success: true, profile_pic: imageUrl });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.delete('/api/users/avatar', authenticateToken, async (req, res) => {
     try {
         await pool.query('UPDATE users SET profile_pic = NULL WHERE id = $1', [req.user.id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.get('/api/search', authenticateToken, async (req, res) => {
     try {
         const { q } = req.query;
         if (!q || q.trim().length === 0) return res.json([]);
         const currentUserId = req.user.id;
-        // Try trigram search first, fallback to ILIKE if pg_trgm not installed
         let result;
         try {
             const query = `SELECT u.id, u.username, u.profile_pic, (SELECT status FROM follows WHERE follower_id = $1 AND following_id = u.id) as follow_status FROM users u WHERE (u.username % $2 OR u.username ILIKE $3) AND u.id != $1 ORDER BY similarity(u.username, $2) DESC LIMIT 20`;
@@ -427,6 +473,7 @@ app.get('/api/search', authenticateToken, async (req, res) => {
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.get('/api/users/:id/followers', authenticateToken, async (req, res) => {
     try {
         const query = `SELECT u.id, u.username, u.profile_pic FROM follows f JOIN users u ON f.follower_id = u.id WHERE f.following_id = $1 AND f.status = 'accepted'`;
@@ -434,6 +481,7 @@ app.get('/api/users/:id/followers', authenticateToken, async (req, res) => {
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 app.get('/api/users/:id/following', authenticateToken, async (req, res) => {
     try {
         const query = `SELECT u.id, u.username, u.profile_pic FROM follows f JOIN users u ON f.following_id = u.id WHERE f.follower_id = $1 AND f.status = 'accepted'`;
@@ -442,14 +490,10 @@ app.get('/api/users/:id/following', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- EXPLORE PAGE ---
+// ==================== EXPLORE ====================
 app.get('/api/explore', authenticateToken, async (req, res) => {
     try {
         const currentUserId = req.user.id;
-        // Get random posts from:
-        // - Public accounts (excluding my own posts)
-        // - Private accounts ONLY if I follow them (accepted)
-        // Excludes the logged-in user's own posts
         const query = `
             SELECT p.id, p.caption, p.created_at, p.user_id, u.username, u.profile_pic,
             COALESCE(JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), '[]') as images,
@@ -474,7 +518,7 @@ app.get('/api/explore', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- SAVED POSTS (BOOKMARKS) ---
+// ==================== SAVED POSTS ====================
 app.post('/api/posts/:id/save', authenticateToken, async (req, res) => {
     try {
         const postId = req.params.id;
@@ -509,9 +553,211 @@ app.get('/api/saved', authenticateToken, async (req, res) => {
             ORDER BY sp.created_at DESC
         `;
         const result = await pool.query(query, [userId]);
+        res.json(result.rows);    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==================== CONVERSATIONS & MESSAGES ====================
+
+// Get or create conversation between two users
+app.post('/api/conversations', authenticateToken, async (req, res) => {
+    try {
+        const myId = req.user.id;
+        const { userId: otherId } = req.body;
+        if (!otherId || parseInt(otherId) === parseInt(myId)) return res.status(400).json({ error: "Invalid user" });
+
+        // Check if conversation already exists between these two users
+        const existing = await pool.query(`
+            SELECT cp1.conversation_id FROM conversation_participants cp1
+            JOIN conversation_participants cp2 ON cp1.conversation_id = cp2.conversation_id
+            WHERE cp1.user_id = $1 AND cp2.user_id = $2
+        `, [myId, otherId]);
+
+        if (existing.rows.length > 0) {
+            return res.json({ conversation_id: existing.rows[0].conversation_id });
+        }
+
+        // Create new conversation
+        const conv = await pool.query('INSERT INTO conversations DEFAULT VALUES RETURNING id');
+        const convId = conv.rows[0].id;
+        await pool.query('INSERT INTO conversation_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)', [convId, myId, otherId]);
+        res.json({ conversation_id: convId });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get inbox (all conversations for current user)
+app.get('/api/conversations', authenticateToken, async (req, res) => {
+    try {
+        const myId = req.user.id;        const query = `
+            SELECT c.id, c.updated_at,
+                u.id as other_user_id, u.username as other_username, u.profile_pic as other_profile_pic,
+                u.last_active as other_last_active,
+                (SELECT m.text FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) as last_message_text,
+                (SELECT m.image_url FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) as last_message_image,
+                (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) as last_message_time,
+                (SELECT m.sender_id FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) as last_message_sender_id,
+                (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != $1 AND m.is_read = false) as unread_count
+            FROM conversations c
+            JOIN conversation_participants cp ON c.id = cp.conversation_id
+            JOIN conversation_participants cp2 ON c.id = cp2.conversation_id AND cp2.user_id != $1
+            JOIN users u ON cp2.user_id = u.id
+            WHERE cp.user_id = $1
+            ORDER BY COALESCE((SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1), c.created_at) DESC
+        `;        const result = await pool.query(query, [myId]);
+        // Add online status and last_active
+        const convos = result.rows.map(r => ({
+            ...r,
+            is_online: onlineUsers.has(parseInt(r.other_user_id)),
+            other_last_active: r.other_last_active || null
+        }));
+        res.json(convos);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Get messages for a conversation
+app.get('/api/conversations/:id/messages', authenticateToken, async (req, res) => {
+    try {
+        const convId = req.params.id;
+        const myId = req.user.id;
+        // Verify user is part of this conversation
+        const check = await pool.query('SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2', [convId, myId]);
+        if (check.rows.length === 0) return res.status(403).json({ error: "Unauthorized" });        // Mark messages as read
+        await pool.query('UPDATE messages SET is_read = true WHERE conversation_id = $1 AND sender_id != $2 AND is_read = false', [convId, myId]);
+        const result = await pool.query(`
+            SELECT m.id, m.text, m.image_url, m.sender_id, m.is_read, m.created_at,
+                   m.edited_at, m.original_text, m.reply_to_id,
+                   u.username, u.profile_pic,
+                   rm.text as reply_text, rm.sender_id as reply_sender_id, ru.username as reply_username
+            FROM messages m
+            JOIN users u ON m.sender_id = u.id
+            LEFT JOIN messages rm ON m.reply_to_id = rm.id
+            LEFT JOIN users ru ON rm.sender_id = ru.id
+            WHERE m.conversation_id = $1
+            ORDER BY m.created_at ASC
+        `, [convId]);
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Send a message
+app.post('/api/conversations/:id/messages', authenticateToken, upload.single('image'), async (req, res) => {
+    try {        const convId = req.params.id;
+        const myId = req.user.id;
+        const { text, reply_to_id } = req.body;
+        const imageUrl = req.file ? `http://localhost:8080/uploads/${req.file.filename}` : null;
+        if (!text && !imageUrl) return res.status(400).json({ error: "Message cannot be empty" });
+
+        // Verify user is part of this conversation
+        const check = await pool.query('SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND user_id = $2', [convId, myId]);
+        if (check.rows.length === 0) return res.status(403).json({ error: "Unauthorized" });
+
+        const replyId = reply_to_id ? parseInt(reply_to_id) : null;
+        const result = await pool.query(
+            'INSERT INTO messages (conversation_id, sender_id, text, image_url, reply_to_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, text, image_url, sender_id, is_read, created_at, reply_to_id',
+            [convId, myId, text || null, imageUrl, replyId]
+        );
+        // Update conversation timestamp
+        await pool.query('UPDATE conversations SET updated_at = NOW() WHERE id = $1', [convId]);        const sender = await pool.query('SELECT username, profile_pic FROM users WHERE id = $1', [myId]);
+        const message = { ...result.rows[0], username: sender.rows[0].username, profile_pic: sender.rows[0].profile_pic, edited_at: null, original_text: null };
+
+        // If reply, attach reply data
+        if (replyId) {
+            const replyData = await pool.query('SELECT m.text, m.sender_id, u.username FROM messages m JOIN users u ON m.sender_id = u.id WHERE m.id = $1', [replyId]);
+            if (replyData.rows.length > 0) {
+                message.reply_text = replyData.rows[0].text;
+                message.reply_sender_id = replyData.rows[0].sender_id;
+                message.reply_username = replyData.rows[0].username;
+            }
+        }
+
+        // Emit real-time message to the conversation room
+        io.to(`chat_${convId}`).emit('new_message', { conversationId: parseInt(convId), message });
+
+        // Also notify the other user (for inbox update / badge) even if they aren't in the chat room
+        const participants = await pool.query('SELECT user_id FROM conversation_participants WHERE conversation_id = $1 AND user_id != $2', [convId, myId]);
+        participants.rows.forEach(p => {
+            emitToUser(p.user_id, 'notification_update', {});
+            emitToUser(p.user_id, 'inbox_update', { conversationId: parseInt(convId), message });
+        });
+
+        res.json(message);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Time limit for edit/delete (12 hours in ms)
+const MSG_ACTION_TIME_LIMIT = 12 * 60 * 60 * 1000;
+
+// Edit a message (own only, within time limit)
+app.put('/api/messages/:id', authenticateToken, async (req, res) => {
+    try {
+        const msgId = req.params.id;
+        const myId = req.user.id;
+        const { text } = req.body;
+        if (!text || !text.trim()) return res.status(400).json({ error: "Message text required" });
+        const check = await pool.query('SELECT * FROM messages WHERE id = $1 AND sender_id = $2', [msgId, myId]);
+        if (check.rows.length === 0) return res.status(403).json({ error: "Unauthorized" });
+        const msg = check.rows[0];
+        // Check time limit
+        const elapsed = Date.now() - new Date(msg.created_at).getTime();
+        if (elapsed > MSG_ACTION_TIME_LIMIT) return res.status(403).json({ error: "Cannot edit message after 12 hours" });
+        // Store original text on first edit only
+        const originalText = msg.original_text || msg.text;
+        await pool.query('UPDATE messages SET text = $1, edited_at = NOW(), original_text = $2 WHERE id = $3', [text.trim(), originalText, msgId]);
+        const convId = msg.conversation_id;
+        const updated = { id: parseInt(msgId), text: text.trim(), edited_at: new Date().toISOString(), original_text: originalText };
+        // Emit edit to chat room
+        io.to(`chat_${convId}`).emit('message_edited', { conversationId: convId, message: updated });
+        res.json({ success: true, ...updated });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Delete a message (own only, within time limit)
+app.delete('/api/messages/:id', authenticateToken, async (req, res) => {
+    try {
+        const msgId = req.params.id;
+        const myId = req.user.id;
+        const check = await pool.query('SELECT * FROM messages WHERE id = $1 AND sender_id = $2', [msgId, myId]);
+        if (check.rows.length === 0) return res.status(403).json({ error: "Unauthorized" });
+        const msg = check.rows[0];
+        // Check time limit
+        const elapsed = Date.now() - new Date(msg.created_at).getTime();
+        if (elapsed > MSG_ACTION_TIME_LIMIT) return res.status(403).json({ error: "Cannot delete message after 12 hours" });
+        const convId = msg.conversation_id;
+        await pool.query('DELETE FROM messages WHERE id = $1', [msgId]);
+        // Emit deletion to chat room
+        io.to(`chat_${convId}`).emit('message_deleted', { conversationId: convId, messageId: parseInt(msgId) });
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Mark conversation as read
+app.put('/api/conversations/:id/read', authenticateToken, async (req, res) => {
+    try {
+        const convId = req.params.id;
+        const myId = req.user.id;
+        await pool.query('UPDATE messages SET is_read = true WHERE conversation_id = $1 AND sender_id != $2 AND is_read = false', [convId, myId]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ==================== NOTIFICATION COUNTS ====================
+app.get('/api/notifications/count', authenticateToken, async (req, res) => {
+    try {
+        const myId = req.user.id;
+        // Unread messages count (across all conversations)
+        const msgResult = await pool.query(`
+            SELECT COUNT(*) as count FROM messages m
+            JOIN conversation_participants cp ON m.conversation_id = cp.conversation_id
+            WHERE cp.user_id = $1 AND m.sender_id != $1 AND m.is_read = false
+        `, [myId]);
+        // Pending follow requests count
+        const reqResult = await pool.query(`
+            SELECT COUNT(*) as count FROM follows WHERE following_id = $1 AND status = 'pending'
+        `, [myId]);
+        const messages = parseInt(msgResult.rows[0].count);
+        const requests = parseInt(reqResult.rows[0].count);
+        res.json({ messages, requests, total: messages + requests });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 const PORT = 8080;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
