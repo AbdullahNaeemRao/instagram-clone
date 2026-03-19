@@ -2663,16 +2663,210 @@ function AuthFacebookButton({ prefersDarkMode, isRegister }) {
   );
 }
 
+function ForgotPasswordModal({ open, onClose, prefersDarkMode }) {
+  const initialForm = { email: '', otp: '', newPassword: '' };
+  const [step, setStep] = useState(1);
+  const [form, setForm] = useState(initialForm);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const resetState = useCallback(() => {
+    setStep(1);
+    setForm(initialForm);
+    setError('');
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      resetState();
+    }
+  }, [open, resetState]);
+
+  useEffect(() => {
+    if (!open || step !== 3) return undefined;
+    const timeoutId = window.setTimeout(() => {
+      resetState();
+      onClose();
+    }, 1600);
+    return () => window.clearTimeout(timeoutId);
+  }, [open, step, onClose, resetState]);
+
+  if (!open) {
+    return null;
+  }
+
+  const surfaceClass = prefersDarkMode ? 'border-white/10 bg-[#13212b] text-white' : 'border-[#d9e1e8] bg-white text-[#111827]';
+  const inputClass = prefersDarkMode
+    ? 'border-[#345067] bg-[#15232d] text-white placeholder:text-[#91a6b7] focus:border-[#4b6e8d]'
+    : 'border-[#d3dce4] bg-[#f7fafc] text-[#111827] placeholder:text-[#6b7280] focus:border-[#7b97b0]';
+  const mutedClass = prefersDarkMode ? 'text-[#9bb0c0]' : 'text-[#607182]';
+  const dangerClass = prefersDarkMode ? 'border-[#7f1d1d] bg-[#3a171a] text-[#fecaca]' : 'border-[#fecaca] bg-[#fff1f2] text-[#b42318]';
+
+  const closeModal = () => {
+    resetState();
+    onClose();
+  };
+
+  const sendResetCode = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await axios.post(API + '/forgot-password', { email: form.email.trim() });
+      setForm((prev) => ({ ...prev, email: (res.data.email || prev.email).trim().toLowerCase() }));
+      setStep(2);
+      toast.success(res.data.message || 'Reset code sent.');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not send reset code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resetPassword = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await axios.post(API + '/reset-password', {
+        email: form.email.trim(),
+        otp: form.otp.trim(),
+        newPassword: form.newPassword,
+      });
+      toast.success(res.data.message || 'Password reset.');
+      setStep(3);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not reset password.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div data-testid="forgot-password-modal" className="fixed inset-0 z-[120] bg-black/60 p-4" onClick={closeModal}>
+      <div className={`mx-auto mt-[10vh] w-full max-w-[460px] rounded-[2rem] border p-6 shadow-[0_24px_80px_rgba(0,0,0,0.18)] sm:p-8 ${surfaceClass}`} onClick={(e) => e.stopPropagation()}>
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <p className={`text-xs font-semibold uppercase tracking-[0.24em] ${mutedClass}`}>Password Recovery</p>
+            <h3 className="mt-2 text-[1.85rem] font-light tracking-[-0.04em]">
+              {step === 1 ? 'Find your account.' : step === 2 ? 'Enter your reset code.' : 'Password updated.'}
+            </h3>
+          </div>
+          <button type="button" onClick={closeModal} className={`rounded-full p-2 ${prefersDarkMode ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {step === 1 && (
+          <form onSubmit={sendResetCode} className="space-y-4">
+            <p className={`text-sm leading-6 ${mutedClass}`}>Enter your email and we will send you a 6-digit reset code.</p>
+            {error && <div className={`rounded-[1.25rem] border px-4 py-3 text-sm ${dangerClass}`}>{error}</div>}
+            <input
+              data-testid="forgot-password-email-input"
+              type="email"
+              placeholder="Email address"
+              value={form.email}
+              className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+            />
+            <button
+              data-testid="forgot-password-send-code"
+              type="submit"
+              disabled={!form.email.trim() || loading}
+              className={`w-full rounded-full px-6 py-5 text-lg font-semibold transition-all ${form.email.trim() && !loading ? 'bg-[#184a83] text-white hover:bg-[#245c9c]' : 'cursor-not-allowed bg-[#184a83]/45 text-white/60'}`}
+            >
+              {loading ? 'Sending...' : 'Send code'}
+            </button>
+          </form>
+        )}
+
+        {step === 2 && (
+          <form onSubmit={resetPassword} className="space-y-4">
+            <p className={`text-sm leading-6 ${mutedClass}`}>We sent a 6-digit code to <span className="font-semibold">{form.email}</span>. Enter it below with your new password.</p>
+            {error && <div className={`rounded-[1.25rem] border px-4 py-3 text-sm ${dangerClass}`}>{error}</div>}
+            <input
+              data-testid="forgot-password-otp-input"
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              placeholder="6-digit code"
+              value={form.otp}
+              className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg tracking-[0.35em] outline-none transition-colors ${inputClass}`}
+              onChange={(e) => setForm({ ...form, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
+            />
+            <input
+              data-testid="forgot-password-new-password-input"
+              type="password"
+              placeholder="New password"
+              value={form.newPassword}
+              className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
+              onChange={(e) => setForm({ ...form, newPassword: e.target.value })}
+            />
+            <button
+              data-testid="forgot-password-reset-submit"
+              type="submit"
+              disabled={form.otp.trim().length !== 6 || !form.newPassword || loading}
+              className={`w-full rounded-full px-6 py-5 text-lg font-semibold transition-all ${form.otp.trim().length === 6 && form.newPassword && !loading ? 'bg-[#184a83] text-white hover:bg-[#245c9c]' : 'cursor-not-allowed bg-[#184a83]/45 text-white/60'}`}
+            >
+              {loading ? 'Updating...' : 'Reset password'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setStep(1); setError(''); setForm((prev) => ({ ...prev, otp: '', newPassword: '' })); }}
+              className={`w-full text-center text-sm font-medium ${mutedClass}`}
+            >
+              Use a different email
+            </button>
+          </form>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-4 text-center">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[#184a83] text-white">
+              <Check size={28} />
+            </div>
+            <p className={`text-sm leading-6 ${mutedClass}`}>Your password was updated successfully. Returning you to login.</p>
+            <button type="button" onClick={closeModal} className="w-full rounded-full bg-[#184a83] px-6 py-5 text-lg font-semibold text-white hover:bg-[#245c9c]">
+              Back to login
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
-  const [isRegister, setIsRegister] = useState(false);
+  const [authMode, setAuthMode] = useState('login');
   const [formData, setFormData] = useState({ identifier: '', email: '', password: '', username: '' });
+  const [verificationEmail, setVerificationEmail] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isForgotPasswordOpen, setIsForgotPasswordOpen] = useState(false);
+
+  const isRegister = authMode === 'register';
+  const isVerifyMode = authMode === 'verify';
 
   if (currentUser) {
     return <Navigate to="/" replace />;
   }
 
+  const switchAuthMode = (mode) => {
+    setAuthError('');
+    setVerificationCode('');
+    setIsSubmitting(false);
+    setAuthMode(mode);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setAuthError('');
+    setIsSubmitting(true);
     try {
       const endpoint = isRegister ? '/register' : '/login';
       const payload = isRegister
@@ -2680,15 +2874,63 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
         : { identifier: formData.identifier, password: formData.password };
       const res = await axios.post(API + endpoint, payload);
       if (res.data.success) {
-        toast.success('Welcome!');
-        if (!isRegister) onLogin(res.data.user, res.data.token);
-        else {
+        if (!isRegister) {
+          toast.success('Welcome back.');
+          onLogin(res.data.user, res.data.token);
+        } else {
+          setVerificationEmail(res.data.email || formData.email.trim().toLowerCase());
+          setVerificationCode('');
           setFormData({ identifier: '', email: formData.email, password: '', username: formData.username });
-          setIsRegister(false);
+          setAuthMode('verify');
+          toast.success(res.data.message || 'Verification code sent.');
         }
       }
-    } catch (e) { toast.error('Error'); }
+    } catch (e) {
+      const apiError = e.response?.data;
+      const message = apiError?.error || 'Something went wrong. Please try again.';
+      setAuthError(message);
+      if (apiError?.requiresVerification) {
+        setVerificationEmail(apiError.email || formData.email || formData.identifier);
+        setAuthMode('verify');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
+
+  const handleVerifyEmail = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setIsSubmitting(true);
+    try {
+      const res = await axios.post(API + '/verify-email', {
+        email: verificationEmail.trim().toLowerCase(),
+        otp: verificationCode.trim(),
+      });
+      toast.success(res.data.message || 'Email verified.');
+      onLogin(res.data.user, res.data.token);
+    } catch (e) {
+      setAuthError(e.response?.data?.error || 'Could not verify email.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setAuthError('');
+    setIsSubmitting(true);
+    try {
+      const res = await axios.post(API + '/resend-verification', {
+        email: verificationEmail.trim().toLowerCase(),
+      });
+      toast.success(res.data.message || 'A new verification code was sent.');
+    } catch (e) {
+      setAuthError(e.response?.data?.error || 'Could not resend verification code.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const pageClass = prefersDarkMode ? 'bg-[#0b1117] text-white' : 'bg-[#f5f7fb] text-[#111827]';
   const rightPanelClass = prefersDarkMode ? 'border-white/10 bg-[#13212b]' : 'border-[#d9e1e8] bg-white';
   const inputClass = prefersDarkMode
@@ -2696,9 +2938,11 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
     : 'border-[#d3dce4] bg-[#f7fafc] text-[#111827] placeholder:text-[#6b7280] focus:border-[#7b97b0]';
   const headingClass = prefersDarkMode ? 'text-white' : 'text-[#111827]';
   const mutedClass = prefersDarkMode ? 'text-[#9bb0c0]' : 'text-[#607182]';
+  const errorClass = prefersDarkMode ? 'border-[#7f1d1d] bg-[#3a171a] text-[#fecaca]' : 'border-[#fecaca] bg-[#fff1f2] text-[#b42318]';
   const formReady = isRegister
     ? formData.email && formData.password && formData.username
     : formData.identifier && formData.password;
+  const verificationReady = verificationEmail && verificationCode.trim().length === 6;
 
   return (
     <div className={`min-h-screen ${pageClass}`}>
@@ -2714,87 +2958,141 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
 
             <div className="space-y-3">
               <p className={`text-sm font-semibold uppercase tracking-[0.24em] ${mutedClass}`}>
-                {isRegister ? 'Create your account' : 'Log into Instagram'}
+                {isVerifyMode ? 'Verify your email' : isRegister ? 'Create your account' : 'Log into Instagram'}
               </p>
               <h2 className={`text-[2rem] font-light leading-tight tracking-[-0.04em] sm:text-[2.35rem] ${headingClass}`}>
-                {isRegister ? 'Start sharing your moments.' : 'Welcome back.'}
+                {isVerifyMode ? 'Enter the 6-digit code.' : isRegister ? 'Start sharing your moments.' : 'Welcome back.'}
               </h2>
               <p className={`max-w-md text-sm leading-6 ${mutedClass}`}>
-                {isRegister
+                {isVerifyMode
+                  ? `We sent a verification code to ${verificationEmail || 'your email address'}.`
+                  : isRegister
                   ? 'Create a profile in seconds and start building your feed.'
                   : 'See stories, explore posts, and pick up right where you left off.'}
               </p>
             </div>
 
-            <form data-testid="login-form" onSubmit={handleSubmit} className="mt-8 space-y-4">
-              {isRegister && (
-                <input
-                  data-testid="register-username-input"
-                  type="text"
-                  placeholder="Choose a username"
-                  value={formData.username}
-                  className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
-                  onChange={e => setFormData({ ...formData, username: e.target.value })}
-                />
-              )}
-              <input
-                data-testid="login-email-input"
-                type="text"
-                placeholder="Mobile number, username or email"
-                value={isRegister ? formData.email : formData.identifier}
-                className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                onChange={e => setFormData(isRegister
-                  ? { ...formData, email: e.target.value }
-                  : { ...formData, identifier: e.target.value })}
-              />
-              <input
-                data-testid="login-password-input"
-                type="password"
-                placeholder="Password"
-                value={formData.password}
-                className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
-                onChange={e => setFormData({ ...formData, password: e.target.value })}
-              />
-              <button
-                data-testid="login-submit"
-                className={`mt-2 w-full rounded-full px-6 py-5 text-lg font-semibold transition-all ${
-                  formReady
-                    ? 'bg-[#184a83] text-white hover:bg-[#245c9c]'
-                    : 'cursor-not-allowed bg-[#184a83]/45 text-white/60'
-                }`}
-                disabled={!formReady}
-              >
-                {isRegister ? 'Create account' : 'Log in'}
-              </button>
-            </form>
+            <div className="mt-8 space-y-4">
+              {authError && <div className={`rounded-[1.25rem] border px-4 py-3 text-sm ${errorClass}`}>{authError}</div>}
 
-            <button type="button" onClick={() => toast('Password recovery is not configured in this demo.')} className={`mt-8 w-full text-center text-lg font-medium ${prefersDarkMode ? 'text-white/85 hover:text-white' : 'text-[#1f2937] hover:text-black'}`}>
-              Forgot password?
-            </button>
+              {!isVerifyMode ? (
+                <form data-testid="login-form" onSubmit={handleSubmit} className="space-y-4">
+                  {isRegister && (
+                    <input
+                      data-testid="register-username-input"
+                      type="text"
+                      placeholder="Choose a username"
+                      value={formData.username}
+                      className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
+                      onChange={e => setFormData({ ...formData, username: e.target.value })}
+                    />
+                  )}
+                  <input
+                    data-testid="login-email-input"
+                    type={isRegister ? 'email' : 'text'}
+                    placeholder={isRegister ? 'Email address' : 'Mobile number, username or email'}
+                    value={isRegister ? formData.email : formData.identifier}
+                    className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    onChange={e => setFormData(isRegister
+                      ? { ...formData, email: e.target.value }
+                      : { ...formData, identifier: e.target.value })}
+                  />
+                  <input
+                    data-testid="login-password-input"
+                    type="password"
+                    placeholder="Password"
+                    value={formData.password}
+                    className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors ${inputClass}`}
+                    onChange={e => setFormData({ ...formData, password: e.target.value })}
+                  />
+                  <button
+                    data-testid="login-submit"
+                    className={`mt-2 w-full rounded-full px-6 py-5 text-lg font-semibold transition-all ${
+                      formReady && !isSubmitting
+                        ? 'bg-[#184a83] text-white hover:bg-[#245c9c]'
+                        : 'cursor-not-allowed bg-[#184a83]/45 text-white/60'
+                    }`}
+                    disabled={!formReady || isSubmitting}
+                  >
+                    {isSubmitting ? (isRegister ? 'Sending code...' : 'Logging in...') : (isRegister ? 'Create account' : 'Log in')}
+                  </button>
+                </form>
+              ) : (
+                <form data-testid="verification-form" onSubmit={handleVerifyEmail} className="space-y-4">
+                  <input
+                    data-testid="verification-email-input"
+                    type="email"
+                    value={verificationEmail}
+                    readOnly
+                    className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg outline-none transition-colors opacity-80 ${inputClass}`}
+                  />
+                  <input
+                    data-testid="verification-code-input"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="6-digit verification code"
+                    value={verificationCode}
+                    className={`w-full rounded-[1.4rem] border px-6 py-5 text-lg tracking-[0.35em] outline-none transition-colors ${inputClass}`}
+                    onChange={e => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  />
+                  <button
+                    data-testid="verification-submit"
+                    className={`mt-2 w-full rounded-full px-6 py-5 text-lg font-semibold transition-all ${
+                      verificationReady && !isSubmitting
+                        ? 'bg-[#184a83] text-white hover:bg-[#245c9c]'
+                        : 'cursor-not-allowed bg-[#184a83]/45 text-white/60'
+                    }`}
+                    disabled={!verificationReady || isSubmitting}
+                  >
+                    {isSubmitting ? 'Verifying...' : 'Verify email'}
+                  </button>
+                  <div className="flex items-center justify-between gap-4 text-sm">
+                    <button type="button" onClick={() => switchAuthMode('login')} className={`${mutedClass} hover:opacity-80`}>
+                      Back to login
+                    </button>
+                    <button type="button" onClick={handleResendVerification} className="font-semibold text-[#3e8bff] hover:opacity-80" disabled={isSubmitting || !verificationEmail}>
+                      Resend code
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+
+            {!isRegister && !isVerifyMode && (
+              <button
+                type="button"
+                data-testid="forgot-password-trigger"
+                onClick={() => setIsForgotPasswordOpen(true)}
+                className={`mt-8 w-full text-center text-sm font-medium ${prefersDarkMode ? 'text-white/85 hover:text-white' : 'text-[#1f2937] hover:text-black'}`}
+              >
+                Forgot password?
+              </button>
+            )}
 
             <div className={`my-10 h-px w-full ${prefersDarkMode ? 'bg-white/10' : 'bg-[#e3eaf0]'}`} />
 
             <div className="space-y-4">
-              <AuthFacebookButton prefersDarkMode={prefersDarkMode} isRegister={isRegister} />
+              {!isVerifyMode && <AuthFacebookButton prefersDarkMode={prefersDarkMode} isRegister={isRegister} />}
               <button
                 data-testid="auth-mode-toggle"
                 type="button"
-                onClick={() => setIsRegister(!isRegister)}
+                onClick={() => switchAuthMode(isRegister || isVerifyMode ? 'login' : 'register')}
                 className={`w-full rounded-full border px-5 py-4 text-base font-medium transition-colors ${
                   prefersDarkMode
                     ? 'border-[#3e8bff] text-[#58a2ff] hover:bg-[#0f2740]'
                     : 'border-[#3e8bff] text-[#1877f2] hover:bg-[#eef6ff]'
                 }`}
               >
-                {isRegister ? 'Back to login' : 'Create new account'}
+                {isRegister || isVerifyMode ? 'Back to login' : 'Create new account'}
               </button>
             </div>
 
             <div className={`mt-10 flex flex-col items-center gap-3 text-center text-sm ${mutedClass}`}>
-              <span>{isRegister ? 'Already have an account?' : "Don't have an account?"}</span>
+              <span>{isRegister || isVerifyMode ? 'Already have an account?' : "Don't have an account?"}</span>
               <div className="flex items-center gap-2">
                 <MetaMark darkMode={prefersDarkMode} />
                 <span>Instagram from Meta</span>
@@ -2803,6 +3101,7 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
           </div>
         </div>
       </div>
+      <ForgotPasswordModal open={isForgotPasswordOpen} onClose={() => setIsForgotPasswordOpen(false)} prefersDarkMode={prefersDarkMode} />
     </div>
   );
 }

@@ -16,7 +16,7 @@ if (schemaOnly && seedOnly) {
 const TOTAL_POSTS = Number(process.env.INSTAGRAM_POST_SEED_COUNT || 500);
 const TARGET_USER_COUNT = Number(process.env.INSTAGRAM_USER_SEED_COUNT || 100);
 const RANDOM_SEED = Number(process.env.INSTAGRAM_RANDOM_SEED || 20260313);
-const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER || 'local-svg';
+const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER || 'picsum';
 const SEED_WITH_INTERACTIONS = process.env.SEED_WITH_INTERACTIONS !== 'false';
 const PROTECT_PRIMARY_DEMO_USERS = process.env.SEED_PROTECT_PRIMARY_DEMO_USERS !== 'false';
 const SEEDED_EMAIL_DOMAIN = 'seedgram.local';
@@ -775,13 +775,14 @@ async function insertSeedUsers(client) {
 
     for (const row of userRows) {
         const result = await client.query(
-            `INSERT INTO users (username, email, password, profile_pic, bio, is_private, last_active, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `INSERT INTO users (username, email, password, is_verified, profile_pic, bio, is_private, last_active, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING id`,
             [
                 row.username,
                 row.email,
                 passwordHash,
+                true,
                 row.profilePic,
                 row.bio,
                 false,

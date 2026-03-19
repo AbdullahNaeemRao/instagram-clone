@@ -10,6 +10,7 @@ const pool = require('./db');
 const { uploadBufferToCloudinary } = require('./cloudinary');
 const { generateEmbedding } = require('./embeddings');
 const { analyzePostIntelligence } = require('./post_intelligence');
+const { sendEmail } = require('./email');
 
 const app = express();
 const server = http.createServer(app);
@@ -36,6 +37,75 @@ const upload = multer({
         cb(null, true);
     },
 });
+
+const OTP_EXPIRY_MINUTES = Number(process.env.OTP_EXPIRY_MINUTES || 15);
+
+function serializeAuthUser(user) {
+    return {
+        id: user.id,
+        username: user.username,
+        profile_pic: user.profile_pic,
+    };
+}
+
+function signAuthToken(user) {
+    return jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET);
+}
+
+function generateOtpCode() {
+    return String(Math.floor(100000 + (Math.random() * 900000)));
+}
+
+function buildOtpExpiryDate() {
+    return new Date(Date.now() + (OTP_EXPIRY_MINUTES * 60 * 1000));
+}
+
+function buildOtpEmailMarkup({ heading, intro, otpCode }) {
+    const safeOtp = String(otpCode || '').replace(/[^0-9]/g, '');
+    return {
+        text: `${heading}\n\n${intro}\n\nYour 6-digit code: ${safeOtp}\n\nThis code expires in ${OTP_EXPIRY_MINUTES} minutes.\n\nIf you did not request this, you can ignore this email.`,
+        html: `
+            <div style="background:#f5f7fb;padding:32px 16px;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+                <div style="max-width:520px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:28px;padding:36px;">
+                    <p style="margin:0 0 12px;font-size:12px;font-weight:700;letter-spacing:0.24em;text-transform:uppercase;color:#6b7280;">Instagram Clone</p>
+                    <h1 style="margin:0 0 16px;font-size:32px;font-weight:500;line-height:1.15;color:#111827;">${heading}</h1>
+                    <p style="margin:0 0 24px;font-size:15px;line-height:1.7;color:#4b5563;">${intro}</p>
+                    <div style="margin:0 0 24px;padding:18px 20px;border-radius:20px;background:#f7fafc;border:1px solid #dbe4ee;text-align:center;">
+                        <span style="font-size:34px;font-weight:700;letter-spacing:0.35em;color:#184a83;">${safeOtp}</span>
+                    </div>
+                    <p style="margin:0 0 10px;font-size:14px;line-height:1.7;color:#4b5563;">This code expires in ${OTP_EXPIRY_MINUTES} minutes.</p>
+                    <p style="margin:0;font-size:13px;line-height:1.7;color:#6b7280;">If you did not request this email, you can safely ignore it.</p>
+                </div>
+            </div>
+        `,
+    };
+}
+
+async function sendVerificationOtpEmail(email, otpCode) {
+    const content = buildOtpEmailMarkup({
+        heading: 'Verify your email',
+        intro: 'Use the verification code below to finish creating your Instagram Clone account.',
+        otpCode,
+    });
+    return sendEmail({
+        to: email,
+        subject: 'Your Instagram Clone verification code',
+        ...content,
+    });
+}
+
+async function sendPasswordResetOtpEmail(email, otpCode) {
+    const content = buildOtpEmailMarkup({
+        heading: 'Reset your password',
+        intro: 'Use the password reset code below to choose a new password for your Instagram Clone account.',
+        otpCode,
+    });
+    return sendEmail({
+        to: email,
+        subject: 'Your Instagram Clone password reset code',
+        ...content,
+    });
+}
 
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
@@ -1021,10 +1091,66 @@ io.on('connection', (socket) => {
 // ==================== AUTH ====================
 app.post('/api/register', async (req, res) => {
     try {
-        const { username, email, password } = req.body;
+        const username = String(req.body.username || '').trim();
+        const email = String(req.body.email || '').trim().toLowerCase();
+        const password = String(req.body.password || '');
+
+        if (!username || !email || !password) {
+            return res.status(400).json({ error: 'Username, email, and password are required.' });
+        }
+
+        const existingByEmail = await pool.query(
+            'SELECT id, email, is_verified FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+            [email]
+        );
+        if (existingByEmail.rows.length > 0) {
+            const existingUser = existingByEmail.rows[0];
+            if (existingUser.is_verified) {
+                return res.status(409).json({ error: 'An account with this email already exists.' });
+            }
+            return res.status(409).json({
+                error: 'This email is already registered but not verified.',
+                code: 'EMAIL_NOT_VERIFIED',
+                requiresVerification: true,
+                email,
+            });
+        }
+
+        const existingUsername = await pool.query(
+            'SELECT id FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1',
+            [username]
+        );
+        if (existingUsername.rows.length > 0) {
+            return res.status(409).json({ error: 'That username is already taken.' });
+        }
+
         const hashedPassword = await bcrypt.hash(password, 10);
-        const result = await pool.query('INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id, username', [username, email, hashedPassword]);
-        res.json({ success: true, user: result.rows[0] });
+        const otpCode = generateOtpCode();
+        const otpExpiresAt = buildOtpExpiryDate();
+        await pool.query(
+            `INSERT INTO users (username, email, password, is_verified, otp_code, otp_expires_at)
+             VALUES ($1, $2, $3, FALSE, $4, $5)`,
+            [username, email, hashedPassword, otpCode, otpExpiresAt]
+        );
+
+        try {
+            await sendVerificationOtpEmail(email, otpCode);
+        } catch (emailError) {
+            console.error('Verification email send failed:', emailError.message);
+            return res.status(500).json({
+                error: 'Your account was created, but we could not send the verification code. Please request a new code.',
+                code: 'VERIFICATION_EMAIL_FAILED',
+                requiresVerification: true,
+                email,
+            });
+        }
+
+        res.status(201).json({
+            success: true,
+            requiresVerification: true,
+            email,
+            message: 'Verification code sent to your email.',
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1041,10 +1167,166 @@ app.post('/api/login', async (req, res) => {
         );
         if (result.rows.length === 0) return res.status(400).json({ error: "User not found" });
         const user = result.rows[0];
-        if (await bcrypt.compare(password, user.password)) {
-            const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET);
-            res.json({ success: true, token, user: { id: user.id, username: user.username, profile_pic: user.profile_pic } });
-        } else { res.status(403).json({ error: "Wrong password" }); }
+        if (!(await bcrypt.compare(password, user.password))) {
+            return res.status(403).json({ error: "Wrong password" });
+        }
+        if (!user.is_verified) {
+            return res.status(403).json({
+                error: 'Please verify your email before logging in.',
+                code: 'EMAIL_NOT_VERIFIED',
+                requiresVerification: true,
+                email: user.email,
+            });
+        }
+        const token = signAuthToken(user);
+        res.json({ success: true, token, user: serializeAuthUser(user) });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/verify-email', async (req, res) => {
+    try {
+        const email = String(req.body.email || '').trim().toLowerCase();
+        const otp = String(req.body.otp || '').trim();
+
+        if (!email || !otp) {
+            return res.status(400).json({ error: 'Email and verification code are required.' });
+        }
+
+        const result = await pool.query(
+            'SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+            [email]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'No account found with that email.' });
+        }
+
+        const user = result.rows[0];
+        if (user.is_verified) {
+            return res.status(400).json({ error: 'This email is already verified. Please log in.' });
+        }
+        if (!user.otp_code || user.otp_code !== otp) {
+            return res.status(400).json({ error: 'The verification code you entered is incorrect.', code: 'OTP_INVALID' });
+        }
+        if (!user.otp_expires_at || new Date(user.otp_expires_at).getTime() < Date.now()) {
+            return res.status(400).json({ error: 'This verification code has expired. Request a new one.', code: 'OTP_EXPIRED' });
+        }
+
+        await pool.query(
+            `UPDATE users
+             SET is_verified = TRUE,
+                 otp_code = NULL,
+                 otp_expires_at = NULL
+             WHERE id = $1`,
+            [user.id]
+        );
+
+        const token = signAuthToken(user);
+        res.json({
+            success: true,
+            token,
+            user: serializeAuthUser(user),
+            message: 'Email verified successfully.',
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/resend-verification', async (req, res) => {
+    try {
+        const email = String(req.body.email || '').trim().toLowerCase();
+        if (!email) {
+            return res.status(400).json({ error: 'Email is required.' });
+        }
+
+        const result = await pool.query(
+            'SELECT id, email, is_verified FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+            [email]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'No account found with that email.' });
+        }
+
+        const user = result.rows[0];
+        if (user.is_verified) {
+            return res.status(400).json({ error: 'This email is already verified. Please log in.' });
+        }
+
+        const otpCode = generateOtpCode();
+        const otpExpiresAt = buildOtpExpiryDate();
+        await pool.query(
+            'UPDATE users SET otp_code = $1, otp_expires_at = $2 WHERE id = $3',
+            [otpCode, otpExpiresAt, user.id]
+        );
+
+        await sendVerificationOtpEmail(email, otpCode);
+        res.json({ success: true, requiresVerification: true, email, message: 'A new verification code was sent.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/forgot-password', async (req, res) => {
+    try {
+        const email = String(req.body.email || '').trim().toLowerCase();
+        if (!email) {
+            return res.status(400).json({ error: 'Email is required.' });
+        }
+
+        const result = await pool.query(
+            'SELECT id, email FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+            [email]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'No account found with that email.', code: 'USER_NOT_FOUND' });
+        }
+
+        const user = result.rows[0];
+        const otpCode = generateOtpCode();
+        const otpExpiresAt = buildOtpExpiryDate();
+        await pool.query(
+            'UPDATE users SET otp_code = $1, otp_expires_at = $2 WHERE id = $3',
+            [otpCode, otpExpiresAt, user.id]
+        );
+
+        await sendPasswordResetOtpEmail(email, otpCode);
+        res.json({ success: true, email, message: 'Password reset code sent to your email.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/reset-password', async (req, res) => {
+    try {
+        const email = String(req.body.email || '').trim().toLowerCase();
+        const otp = String(req.body.otp || '').trim();
+        const newPassword = String(req.body.newPassword || '');
+
+        if (!email || !otp || !newPassword) {
+            return res.status(400).json({ error: 'Email, code, and new password are required.' });
+        }
+
+        const result = await pool.query(
+            'SELECT id, otp_code, otp_expires_at FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+            [email]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'No account found with that email.', code: 'USER_NOT_FOUND' });
+        }
+
+        const user = result.rows[0];
+        if (!user.otp_code || user.otp_code !== otp) {
+            return res.status(400).json({ error: 'The reset code you entered is incorrect.', code: 'OTP_INVALID' });
+        }
+        if (!user.otp_expires_at || new Date(user.otp_expires_at).getTime() < Date.now()) {
+            return res.status(400).json({ error: 'This reset code has expired. Request a new one.', code: 'OTP_EXPIRED' });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await pool.query(
+            `UPDATE users
+             SET password = $1,
+                 otp_code = NULL,
+                 otp_expires_at = NULL
+             WHERE id = $2`,
+            [hashedPassword, user.id]
+        );
+
+        res.json({ success: true, message: 'Password updated successfully. You can log in now.' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
