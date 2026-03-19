@@ -425,6 +425,47 @@ async function getPostImageSources(postId) {
         .filter(Boolean);
 }
 
+async function fetchVisiblePostById(postId, userId) {
+    const result = await pool.query(
+        `
+        SELECT
+            p.id,
+            p.caption,
+            p.category,
+            p.created_at,
+            p.user_id,
+            COALESCE(p.share_count, 0) AS share_count,
+            u.username,
+            u.profile_pic,
+            COALESCE(JSON_AGG(pi.image_url ORDER BY pi.sort_order) FILTER (WHERE pi.image_url IS NOT NULL), '[]') AS images,
+            (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
+            (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
+            EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $2) AS is_liked,
+            EXISTS(SELECT 1 FROM saved_posts WHERE post_id = p.id AND user_id = $2) AS is_saved,
+            COALESCE(pf.feedback, 'none') AS interest_feedback
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN post_images pi ON p.id = pi.post_id
+        LEFT JOIN post_interest_feedback pf ON pf.post_id = p.id AND pf.user_id = $2
+        WHERE p.id = $1
+          AND (
+              p.user_id = $2
+              OR u.is_private = false
+              OR p.user_id IN (
+                  SELECT following_id
+                  FROM follows
+                  WHERE follower_id = $2 AND status = 'accepted'
+              )
+          )
+        GROUP BY p.id, u.id, pf.feedback
+        LIMIT 1
+        `,
+        [postId, userId]
+    );
+
+    return result.rows[0] || null;
+}
+
 async function queuePostIntelligenceAnalysis(postId, caption, imageSources) {
     try {
         await pool.query(
@@ -494,6 +535,7 @@ async function fetchDiscoveryPosts(userId, limit, offset, seed) {
             u.username,
             u.profile_pic,
             COALESCE(JSON_AGG(pi.image_url ORDER BY pi.sort_order) FILTER (WHERE pi.image_url IS NOT NULL), '[]') AS images,
+            COALESCE(p.share_count, 0) AS share_count,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS is_liked,
@@ -567,6 +609,7 @@ async function fetchPersonalizedPosts(userId, limit, offset, seed, userEmbedding
                 u.username,
                 u.profile_pic,
                 COALESCE(JSON_AGG(pi.image_url ORDER BY pi.sort_order) FILTER (WHERE pi.image_url IS NOT NULL), '[]') AS images,
+                COALESCE(p.share_count, 0) AS share_count,
                 (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
                 (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
                 EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS is_liked,
@@ -604,6 +647,7 @@ async function fetchPersonalizedPosts(userId, limit, offset, seed, userEmbedding
             username,
             profile_pic,
             images,
+            share_count,
             like_count,
             comment_count,
             is_liked,
@@ -679,6 +723,7 @@ async function fetchRecommendationCandidates(userId, seed, userEmbedding, maxCan
             u.username,
             u.profile_pic,
             COALESCE(JSON_AGG(pi.image_url ORDER BY pi.sort_order) FILTER (WHERE pi.image_url IS NOT NULL), '[]') AS images,
+            COALESCE(p.share_count, 0) AS share_count,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS is_liked,
@@ -711,6 +756,7 @@ async function fetchRecommendationCandidates(userId, seed, userEmbedding, maxCan
     const result = await pool.query(query, [userId, userEmbedding, seed, maxCandidates]);
     return result.rows.map((row) => ({
         ...row,
+        share_count: Number(row.share_count || 0),
         like_count: Number(row.like_count || 0),
         comment_count: Number(row.comment_count || 0),
         category_score: Number(row.category_score || 0),
@@ -729,7 +775,7 @@ function getRecencyScore(createdAt) {
 }
 
 function getPopularityScore(post) {
-    return Math.log1p((post.like_count || 0) + ((post.comment_count || 0) * 2));
+    return Math.log1p((post.like_count || 0) + ((post.comment_count || 0) * 2) + ((post.share_count || 0) * 3));
 }
 
 function decorateRecommendationCandidates(candidates) {
@@ -1385,6 +1431,16 @@ app.get('/api/posts', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/posts/:id', authenticateToken, async (req, res) => {
+    try {
+        const post = await fetchVisiblePostById(req.params.id, req.user.id);
+        if (!post) {
+            return res.status(404).json({ error: 'Post not found' });
+        }
+        res.json(post);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.put('/api/posts/:id', authenticateToken, async (req, res) => {
     try {
         const { caption } = req.body;
@@ -1413,6 +1469,30 @@ app.post('/api/posts/:id/like', authenticateToken, async (req, res) => {
             res.json({ status: 'liked' });
         }
         queueInterestEmbeddingRefresh(userId);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/posts/:id/share', authenticateToken, async (req, res) => {
+    try {
+        const postId = req.params.id;
+        const visiblePost = await fetchVisiblePostById(postId, req.user.id);
+        if (!visiblePost) {
+            return res.status(404).json({ error: 'Post not found' });
+        }
+
+        const result = await pool.query(
+            `UPDATE posts
+             SET share_count = COALESCE(share_count, 0) + 1
+             WHERE id = $1
+             RETURNING id, share_count`,
+            [postId]
+        );
+
+        res.json({
+            success: true,
+            post_id: result.rows[0].id,
+            share_count: Number(result.rows[0].share_count || 0),
+        });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1741,6 +1821,7 @@ app.get('/api/me/interest-feedback', authenticateToken, async (req, res) => {
                 u.username,
                 u.profile_pic,
                 COALESCE(JSON_AGG(pi.image_url ORDER BY pi.sort_order) FILTER (WHERE pi.image_url IS NOT NULL), '[]') AS images,
+                COALESCE(p.share_count, 0) AS share_count,
                 (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
                 (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
                 EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS is_liked,
@@ -1778,6 +1859,7 @@ app.get('/api/me/interactions/liked', authenticateToken, async (req, res) => {
                     FROM post_images pi
                     WHERE pi.post_id = p.id
                 ), '[]'::json) AS images,
+                COALESCE(p.share_count, 0) AS share_count,
                 (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
                 (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
                 true AS is_liked,
@@ -1821,6 +1903,7 @@ app.get('/api/me/interactions/commented', authenticateToken, async (req, res) =>
                     FROM post_images pi
                     WHERE pi.post_id = p.id
                 ), '[]'::json) AS images,
+                COALESCE(p.share_count, 0) AS share_count,
                 (SELECT COUNT(*) FROM likes WHERE post_id = p.id) AS like_count,
                 (SELECT COUNT(*) FROM comments WHERE post_id = p.id) AS comment_count,
                 EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) AS is_liked,
@@ -2083,6 +2166,7 @@ app.get('/api/explore', authenticateToken, async (req, res) => {
                     COALESCE(JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), '[]') as images
                 FROM (
                     SELECT p.id, p.caption, p.created_at, p.user_id, u.username, u.profile_pic,
+                        COALESCE(p.share_count, 0) as share_count,
                         (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
                         (SELECT COUNT(*) FROM comments WHERE post_id = p.id) as comment_count,
                         EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) as is_liked,
@@ -2103,7 +2187,7 @@ app.get('/api/explore', authenticateToken, async (req, res) => {
                 ) sub
                 LEFT JOIN post_images pi ON sub.id = pi.post_id
                 GROUP BY sub.id, sub.caption, sub.created_at, sub.user_id, sub.username, sub.profile_pic,
-                         sub.like_count, sub.comment_count, sub.is_liked, sub.is_saved, sub.similarity_score
+                         sub.share_count, sub.like_count, sub.comment_count, sub.is_liked, sub.is_saved, sub.similarity_score
                 ORDER BY sub.similarity_score DESC, sub.created_at DESC
             `;
             result = await pool.query(query, [currentUserId, userEmbedding]);
@@ -2113,6 +2197,7 @@ app.get('/api/explore', authenticateToken, async (req, res) => {
             const query = `
                 SELECT p.id, p.caption, p.created_at, p.user_id, u.username, u.profile_pic,
                 COALESCE(JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), '[]') as images,
+                COALESCE(p.share_count, 0) as share_count,
                 (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
                 (SELECT COUNT(*) FROM comments WHERE post_id = p.id) as comment_count,
                 EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) as is_liked,
@@ -2209,6 +2294,7 @@ app.get('/api/saved', authenticateToken, async (req, res) => {
         const query = `
             SELECT p.id, p.caption, p.created_at, p.user_id, u.username, u.profile_pic,
             COALESCE(JSON_AGG(pi.image_url) FILTER (WHERE pi.image_url IS NOT NULL), '[]') as images,
+            COALESCE(p.share_count, 0) as share_count,
             (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
             (SELECT COUNT(*) FROM comments WHERE post_id = p.id) as comment_count,
             EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = $1) as is_liked,

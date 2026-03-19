@@ -64,6 +64,58 @@ function timeAgo(date) {
   return Math.floor(d / 7) + 'w';
 }
 
+function buildSharedPostUrl(postId) {
+  if (typeof window === 'undefined') {
+    return `/post/${postId}`;
+  }
+  return `${window.location.origin}/post/${postId}`;
+}
+
+async function copyTextToClipboard(text) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (typeof document === 'undefined') {
+    throw new Error('Clipboard is not available on this device.');
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'absolute';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const didCopy = document.execCommand('copy');
+  document.body.removeChild(textarea);
+
+  if (!didCopy) {
+    throw new Error('Clipboard copy failed.');
+  }
+}
+
+function isShareAbortError(error) {
+  return error?.name === 'AbortError' || /abort|cancel/i.test(String(error?.message || ''));
+}
+
+async function triggerPostShare(postId) {
+  const shareUrl = buildSharedPostUrl(postId);
+
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    await navigator.share({
+      title: 'Check out this post',
+      url: shareUrl,
+    });
+    return { shareUrl, method: 'native' };
+  }
+
+  await copyTextToClipboard(shareUrl);
+  toast.success('Link Copied!');
+  return { shareUrl, method: 'clipboard' };
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -245,6 +297,7 @@ export default function App() {
           <Routes>
             <Route path="/login" element={<LoginPage onLogin={handleLogin} currentUser={user} prefersDarkMode={prefersDarkMode} />} />
             <Route path="/" element={<ProtectedRoute user={user} isAuthChecking={isAuthChecking}><Feed /></ProtectedRoute>} />
+            <Route path="/post/:postId" element={<ProtectedRoute user={user} isAuthChecking={isAuthChecking}><PostPermalinkPage /></ProtectedRoute>} />
             <Route path="/search" element={<ProtectedRoute user={user} isAuthChecking={isAuthChecking}><SearchPage currentUser={user} /></ProtectedRoute>} />
             <Route path="/u/:username" element={<ProtectedRoute user={user} isAuthChecking={isAuthChecking}><PublicProfile currentUser={user} /></ProtectedRoute>} />
             <Route path="/messages" element={<ProtectedRoute user={user} isAuthChecking={isAuthChecking}><ChatInbox currentUser={user} /></ProtectedRoute>} />
@@ -1066,6 +1119,11 @@ function Feed() {
     }
   };
 
+  const handlePostUpdate = (postId, updates) => {
+    setPosts(prev => prev.map(post => post.id === postId ? { ...post, ...updates } : post));
+    setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current);
+  };
+
   useEffect(() => {
     fetchStories();
     refreshFeed();
@@ -1115,6 +1173,7 @@ function Feed() {
           onImageClick={setSelectedPost}
           onInterestChange={handleInterestChange}
           onRecommendationSignal={handleRecommendationSignal}
+          onPostUpdate={handlePostUpdate}
         />
       ))}
       {!isFeedLoading && hasMorePosts && (
@@ -1132,6 +1191,7 @@ function Feed() {
           onClose={() => setSelectedPost(null)}
           onInterestChange={handleInterestChange}
           onRecommendationSignal={handleRecommendationSignal}
+          onPostUpdate={handlePostUpdate}
         />
       )}
       {selectedStoryGroup && <StoryViewer stories={selectedStoryGroup} onClose={() => setSelectedStoryGroup(null)} />}
@@ -1393,7 +1453,7 @@ function CommentItem({ comment, currentUserId, isPostOwner, onDelete, onReply, o
 }
 
 /* ========== POST MODAL ========== */
-function PostModal({ post, onClose, onInterestChange, onRecommendationSignal }) {
+function PostModal({ post, onClose, onInterestChange, onRecommendationSignal, onPostUpdate }) {
   const navigate = useNavigate();
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState('');
@@ -1401,6 +1461,7 @@ function PostModal({ post, onClose, onInterestChange, onRecommendationSignal }) 
   const [liked, setLiked] = useState(post.is_liked);
   const [likeCount, setLikeCount] = useState(parseInt(post.like_count || 0));
   const [commentCount, setCommentCount] = useState(parseInt(post.comment_count || 0));
+  const [shareCount, setShareCount] = useState(parseInt(post.share_count || 0));
   const [saved, setSaved] = useState(post.is_saved);
   const [interestFeedback, setInterestFeedback] = useState(post.interest_feedback || 'none');
   const [isEditing, setIsEditing] = useState(false);
@@ -1411,6 +1472,10 @@ function PostModal({ post, onClose, onInterestChange, onRecommendationSignal }) 
   const inputRef = useRef(null);
   const images = Array.isArray(post.images) ? post.images : (post.image_url ? [post.image_url] : []);
   const threadedComments = buildCommentThread(comments);
+
+  useEffect(() => {
+    setShareCount(parseInt(post.share_count || 0));
+  }, [post.id, post.share_count]);
 
   const fetchComments = async () => {
     try {
@@ -1452,6 +1517,35 @@ function PostModal({ post, onClose, onInterestChange, onRecommendationSignal }) 
   const togglePin = async (cid) => { try { const token = localStorage.getItem('token'); await axios.put(API + '/comments/' + cid + '/pin', {}, { headers: { Authorization: 'Bearer ' + token } }); fetchComments(); } catch (e) { /* */ } };
   const toggleLike = async () => { try { const token = localStorage.getItem('token'); const res = await axios.post(API + '/posts/' + post.id + '/like', {}, { headers: { Authorization: 'Bearer ' + token } }); setLiked(res.data.status === 'liked'); setLikeCount(prev => res.data.status === 'liked' ? prev + 1 : prev - 1); triggerRecommendationRefresh(); } catch (e) { /* */ } };
   const toggleSave = async () => { try { const token = localStorage.getItem('token'); const res = await axios.post(API + '/posts/' + post.id + '/save', {}, { headers: { Authorization: 'Bearer ' + token } }); setSaved(res.data.status === 'saved'); toast.success(res.data.status === 'saved' ? 'Post saved' : 'Post unsaved'); triggerRecommendationRefresh(); } catch (e) { /* */ } };
+  const handleShare = async () => {
+    const previousShareCount = shareCount;
+    const optimisticShareCount = previousShareCount + 1;
+    let shareCompleted = false;
+
+    try {
+      await triggerPostShare(post.id);
+      shareCompleted = true;
+      setShareCount(optimisticShareCount);
+      onPostUpdate?.(post.id, { share_count: optimisticShareCount });
+
+      const token = localStorage.getItem('token');
+      const res = await axios.post(API + '/posts/' + post.id + '/share', {}, { headers: { Authorization: 'Bearer ' + token } });
+      const confirmedShareCount = parseInt(res.data.share_count || optimisticShareCount);
+      setShareCount(confirmedShareCount);
+      onPostUpdate?.(post.id, { share_count: confirmedShareCount });
+    } catch (e) {
+      if (shareCompleted) {
+        setShareCount(previousShareCount);
+        onPostUpdate?.(post.id, { share_count: previousShareCount });
+        toast.error('Could not update share count.');
+        return;
+      }
+
+      if (!isShareAbortError(e)) {
+        toast.error(e?.message || 'Could not share this post.');
+      }
+    }
+  };
   const deletePost = async () => { if (!confirm('Delete?')) return; try { const token = localStorage.getItem('token'); await axios.delete(API + '/posts/' + post.id, { headers: { Authorization: 'Bearer ' + token } }); onClose(); window.location.reload(); } catch (e) { /* */ } };
   const handleReply = (comment) => { setReplyTarget({ id: comment.id, username: comment.username, text: comment.text }); inputRef.current?.focus(); };
   const updateInterest = async (feedback) => {
@@ -1532,7 +1626,10 @@ function PostModal({ post, onClose, onInterestChange, onRecommendationSignal }) 
                 <MessageCircle size={24} className="cursor-pointer hover:text-gray-500" onClick={() => inputRef.current?.focus()} />
                 <span className="text-sm font-semibold text-gray-700">{commentCount}</span>
               </div>
-              <Send size={24} className="hover:text-gray-500" />
+              <div data-testid="post-modal-share" className="flex items-center gap-1.5 cursor-pointer hover:text-gray-500" onClick={handleShare}>
+                <Send size={24} />
+                <span className="text-sm font-semibold text-gray-700">{shareCount}</span>
+              </div>
               <Bookmark size={24} className={'cursor-pointer hover:opacity-60 ml-auto ' + (saved ? 'fill-black text-black' : 'text-black')} onClick={toggleSave} />
             </div>
             {!isMyPost && (
@@ -1580,12 +1677,13 @@ function PostModal({ post, onClose, onInterestChange, onRecommendationSignal }) 
 }
 
 /* ========== POST CARD ========== */
-function PostCard({ post, onImageClick, onInterestChange, onRecommendationSignal }) {
+function PostCard({ post, onImageClick, onInterestChange, onRecommendationSignal, onPostUpdate }) {
   const navigate = useNavigate();
   const [liked, setLiked] = useState(post.is_liked);
   const [likeCount, setLikeCount] = useState(parseInt(post.like_count || 0));
   const [saved, setSaved] = useState(post.is_saved);
   const [commentCount, setCommentCount] = useState(parseInt(post.comment_count || 0));
+  const [shareCount, setShareCount] = useState(parseInt(post.share_count || 0));
   const [interestFeedback, setInterestFeedback] = useState(post.interest_feedback || 'none');
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState([]);
@@ -1596,6 +1694,10 @@ function PostCard({ post, onImageClick, onInterestChange, onRecommendationSignal
   const inputRef = useRef(null);
   const images = Array.isArray(post.images) && post.images.length > 0 ? post.images : (post.image_url ? [post.image_url] : []);
   const threadedComments = buildCommentThread(comments);
+
+  useEffect(() => {
+    setShareCount(parseInt(post.share_count || 0));
+  }, [post.id, post.share_count]);
 
   const loadComments = async () => {
     try {
@@ -1627,6 +1729,35 @@ function PostCard({ post, onImageClick, onInterestChange, onRecommendationSignal
       toast.success(res.data.status === 'saved' ? 'Post saved' : 'Post unsaved');
       triggerRecommendationRefresh();
     } catch (e) { /* */ }
+  };
+  const handleShare = async () => {
+    const previousShareCount = shareCount;
+    const optimisticShareCount = previousShareCount + 1;
+    let shareCompleted = false;
+
+    try {
+      await triggerPostShare(post.id);
+      shareCompleted = true;
+      setShareCount(optimisticShareCount);
+      onPostUpdate?.(post.id, { share_count: optimisticShareCount });
+
+      const token = localStorage.getItem('token');
+      const res = await axios.post(API + '/posts/' + post.id + '/share', {}, { headers: { Authorization: 'Bearer ' + token } });
+      const confirmedShareCount = parseInt(res.data.share_count || optimisticShareCount);
+      setShareCount(confirmedShareCount);
+      onPostUpdate?.(post.id, { share_count: confirmedShareCount });
+    } catch (e) {
+      if (shareCompleted) {
+        setShareCount(previousShareCount);
+        onPostUpdate?.(post.id, { share_count: previousShareCount });
+        toast.error('Could not update share count.');
+        return;
+      }
+
+      if (!isShareAbortError(e)) {
+        toast.error(e?.message || 'Could not share this post.');
+      }
+    }
   };
   const toggleComments = async () => { if (!showComments) { await loadComments(); } setShowComments(!showComments); };
   const postComment = async (e) => {
@@ -1697,7 +1828,10 @@ function PostCard({ post, onImageClick, onInterestChange, onRecommendationSignal
             <MessageCircle size={24} />
             <span className="text-sm font-semibold text-gray-700">{commentCount}</span>
           </div>
-          <Send size={24} className="hover:opacity-60" />
+          <div data-testid="feed-post-share" className="flex items-center gap-1.5 cursor-pointer hover:opacity-60" onClick={handleShare}>
+            <Send size={24} />
+            <span className="text-sm font-semibold text-gray-700">{shareCount}</span>
+          </div>
           <Bookmark data-testid="feed-post-save" size={24} className={'cursor-pointer hover:opacity-60 ml-auto ' + (saved ? 'fill-black text-black' : 'text-black')} onClick={toggleSave} />
         </div>
         {!isMyPost && (
@@ -2396,7 +2530,7 @@ function PublicProfile({ currentUser }) {
         </>
       )}
 
-      {selectedPost && <PostModal post={selectedPost} onClose={() => { setSelectedPost(null); if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); if (activeTab === 'liked' && isMe) fetchInteractionPosts('liked'); if (activeTab === 'commented' && isMe) fetchInteractionPosts('commented'); }} onInterestChange={() => { if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); }} />}
+      {selectedPost && <PostModal post={selectedPost} onClose={() => { setSelectedPost(null); if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); if (activeTab === 'liked' && isMe) fetchInteractionPosts('liked'); if (activeTab === 'commented' && isMe) fetchInteractionPosts('commented'); }} onInterestChange={() => { if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); }} onPostUpdate={(postId, updates) => setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current)} />}
       {showUserList && <UserListModal userId={profileData.user.id} type={showUserList} onClose={() => setShowUserList(null)} isOwnProfile={isMe} onFollowerRemoved={() => setProfileData(prev => ({ ...prev, user: { ...prev.user, followers_count: Math.max(0, parseInt(prev.user.followers_count) - 1) } }))} onFollowingRemoved={() => setProfileData(prev => ({ ...prev, user: { ...prev.user, following_count: Math.max(0, parseInt(prev.user.following_count) - 1) } }))} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} isPrivate={profileData.user.is_private} followerCount={profileData.user.followers_count} onTogglePrivacy={() => togglePrivacy()} onManageFollowers={() => { setShowSettings(false); setShowUserList('followers'); }} />}
     </div>
@@ -2448,6 +2582,11 @@ function SearchPage({ currentUser }) {
       setExplorePosts(prev => prev.filter(post => post.id !== postId));
       setSelectedPost(current => current && current.id === postId ? null : current);
     }
+  };
+
+  const handlePostUpdate = (postId, updates) => {
+    setExplorePosts(prev => prev.map(post => post.id === postId ? { ...post, ...updates } : post));
+    setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current);
   };
 
   const handleRecommendationSignal = () => {
@@ -2523,9 +2662,67 @@ function SearchPage({ currentUser }) {
           onClose={() => setSelectedPost(null)}
           onInterestChange={handleInterestChange}
           onRecommendationSignal={handleRecommendationSignal}
+          onPostUpdate={handlePostUpdate}
         />
       )}
     </div>
+  );
+}
+
+function PostPermalinkPage() {
+  const { postId } = useParams();
+  const navigate = useNavigate();
+  const [post, setPost] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+        setError('');
+        const token = localStorage.getItem('token');
+        const res = await axios.get(API + '/posts/' + postId, { headers: { Authorization: 'Bearer ' + token } });
+        setPost(res.data);
+      } catch (e) {
+        setPost(null);
+        setError(e.response?.data?.error || 'Post not found.');
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [postId]);
+
+  const closePermalink = () => {
+    if (window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+    navigate('/');
+  };
+
+  if (loading) {
+    return <div className="p-10 text-center text-sm text-gray-500">Loading post...</div>;
+  }
+
+  if (!post) {
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 p-6 text-center">
+        <p className="text-base font-semibold text-gray-800">{error || 'Post not found.'}</p>
+        <button type="button" onClick={() => navigate('/')} className="rounded-full border border-gray-300 px-5 py-2 text-sm font-semibold text-gray-700 hover:border-gray-500">
+          Back to home
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <PostModal
+      post={post}
+      onClose={closePermalink}
+      onInterestChange={(id, feedback) => { if (feedback === 'not_interested') closePermalink(); }}
+      onPostUpdate={(id, updates) => setPost(current => current && current.id === id ? { ...current, ...updates } : current)}
+    />
   );
 }
 

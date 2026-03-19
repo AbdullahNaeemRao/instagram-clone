@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS posts (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     category post_category,
     caption TEXT NOT NULL DEFAULT '',
+    share_count INTEGER NOT NULL DEFAULT 0,
     hashtags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     language_code VARCHAR(8) NOT NULL DEFAULT 'en',
     metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS category post_category;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS share_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS hashtags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS language_code VARCHAR(8) NOT NULL DEFAULT 'en';
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::JSONB;
@@ -453,6 +455,7 @@ SELECT
     p.content_tsv,
     p.embedding,
     p.created_at,
+    COALESCE(p.share_count, 0) AS share_count,
     COALESCE(l.like_count, 0) AS like_count,
     COALESCE(c.comment_count, 0) AS comment_count,
     COALESCE(s.save_count, 0) AS save_count
