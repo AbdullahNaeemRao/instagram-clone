@@ -2,9 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light dark;
+}
+
 body {
   background-color: #fafafa;
   color: #262626;
+  font-feature-settings: "ss01" 1, "cv05" 1;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .input-field {
@@ -13,4 +21,226 @@ body {
 
 .btn-primary {
   @apply w-full text-white bg-blue-500 hover:bg-blue-600 font-medium rounded-lg text-sm px-5 py-2.5 text-center transition-all;
+}
+
+.auth-gradient-text {
+  background: linear-gradient(95deg, #ff7a00 0%, #ff2f6d 38%, #ff00b8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.app-theme-dark {
+  color-scheme: dark;
+  background-color: #0b1117;
+  color: #f8fafc;
+}
+
+.app-theme-dark main {
+  background-color: #0b1117;
+}
+
+.app-theme-dark .bg-white {
+  background-color: #111b24;
+}
+
+.app-theme-dark .bg-gray-50 {
+  background-color: #13202b;
+}
+
+.app-theme-dark .bg-gray-100 {
+  background-color: #182733;
+}
+
+.app-theme-dark .bg-gray-200 {
+  background-color: #24384a;
+}
+
+.app-theme-dark .border-gray-100,
+.app-theme-dark .border-gray-200,
+.app-theme-dark .border-gray-300 {
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+.app-theme-dark .text-black,
+.app-theme-dark .text-gray-900 {
+  color: #f8fafc;
+}
+
+.app-theme-dark .text-gray-700 {
+  color: #dde7f0;
+}
+
+.app-theme-dark .text-gray-600 {
+  color: #bdcad6;
+}
+
+.app-theme-dark .text-gray-500 {
+  color: #98aabc;
+}
+
+.app-theme-dark .text-gray-400 {
+  color: #7f95ab;
+}
+
+.app-theme-dark .text-gray-300 {
+  color: #667b91;
+}
+
+.app-theme-dark .hover\:bg-gray-50:hover {
+  background-color: #182733;
+}
+
+.app-theme-dark .hover\:bg-gray-100:hover {
+  background-color: #1d3040;
+}
+
+.app-theme-dark input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.app-theme-dark textarea,
+.app-theme-dark select {
+  color: #f8fafc;
+  border-color: rgba(148, 163, 184, 0.18);
+  background-color: rgba(17, 27, 36, 0.92);
+}
+
+.app-theme-dark input::placeholder,
+.app-theme-dark textarea::placeholder {
+  color: #7f95ab;
+}
+
+.app-theme-dark .shadow-2xl,
+.app-theme-dark .shadow-\[0_24px_80px_rgba\(0\,0\,0\,0\.08\)\] {
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+}
+
+.chat-thread-surface {
+  background-color: #f8fafc;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(148, 163, 184, 0.14) 1px, transparent 0),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(248, 250, 252, 0.98) 100%);
+  background-size: 22px 22px, 100% 100%;
+}
+
+.chat-detail-surface {
+  background-color: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(14px);
+}
+
+.app-theme-dark .chat-thread-surface {
+  background-color: #0f1821;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(118, 151, 181, 0.12) 1px, transparent 0),
+    radial-gradient(circle at top, rgba(53, 97, 138, 0.28), transparent 44%),
+    linear-gradient(180deg, rgba(14, 23, 32, 0.98) 0%, rgba(11, 18, 25, 1) 100%);
+  background-size: 24px 24px, 100% 100%, 100% 100%;
+}
+
+.app-theme-dark .chat-detail-surface {
+  background-color: rgba(17, 27, 36, 0.88);
+}
+
+.auth-float-soft {
+  animation: authFloat 4.8s ease-in-out infinite;
+}
+
+.auth-launch-screen {
+  animation: authLaunchBackdropIn 220ms ease-out both;
+}
+
+.auth-launch-screen-exit {
+  animation: authLaunchBackdropOut 520ms cubic-bezier(0.55, 0.04, 0.35, 1) both;
+}
+
+.auth-launch-logo {
+  opacity: 0;
+  transform: translateY(14px) scale(0.86);
+  animation: authLaunchLogoIn 820ms cubic-bezier(0.22, 1, 0.36, 1) 120ms forwards;
+}
+
+.auth-launch-screen-exit .auth-launch-logo {
+  animation: authLaunchLogoOut 520ms cubic-bezier(0.55, 0.04, 0.35, 1) forwards;
+}
+
+.auth-launch-meta {
+  opacity: 0;
+  transform: translateY(10px);
+  animation: authLaunchMetaIn 420ms ease-out 760ms forwards;
+}
+
+.auth-launch-screen-exit .auth-launch-meta {
+  animation: authLaunchMetaOut 320ms ease-in forwards;
+}
+
+@keyframes authLaunchBackdropIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes authLaunchBackdropOut {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes authLaunchLogoIn {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.86);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes authLaunchLogoOut {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+}
+
+@keyframes authLaunchMetaIn {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes authLaunchMetaOut {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes authFloat {
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
 }
