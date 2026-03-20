@@ -1308,7 +1308,13 @@ app.post('/api/resend-verification', async (req, res) => {
             [otpCode, otpExpiresAt, user.id]
         );
 
-        await sendVerificationOtpEmail(email, otpCode);
+        try {
+            await sendVerificationOtpEmail(email, otpCode);
+        } catch (emailErr) {
+            console.error('Resend verification email send failed:', emailErr);
+            return res.status(500).json({ error: 'Failed to send verification code. Please try again later.' });
+        }
+
         res.json({ success: true, requiresVerification: true, email, message: 'A new verification code was sent.' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1336,7 +1342,13 @@ app.post('/api/forgot-password', async (req, res) => {
             [otpCode, otpExpiresAt, user.id]
         );
 
-        await sendPasswordResetOtpEmail(email, otpCode);
+        try {
+            await sendPasswordResetOtpEmail(email, otpCode);
+        } catch (emailErr) {
+            console.error('Forgot password email send failed:', emailErr);
+            return res.status(500).json({ error: 'Failed to send reset code. Please try again later.' });
+        }
+
         res.json({ success: true, email, message: 'Password reset code sent to your email.' });
     } catch (err) { res.status(500).json({ error: err.message }); }
 });

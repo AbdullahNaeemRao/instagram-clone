@@ -15,6 +15,7 @@ import { io as socketIO } from 'socket.io-client';
 const BACKEND_ORIGIN = "https://abdullahnaeemrao-insta-backend.hf.space";
 const API = `${BACKEND_ORIGIN}/api`;
 const SocketContext = createContext(null);
+const EMAIL_REQUEST_TIMEOUT_MS = 20000;
 
 function ProtectedRoute({ user, isAuthChecking, children }) {
   if (isAuthChecking) return <div className="p-10 text-center">Loading...</div>;
@@ -2911,12 +2912,20 @@ function ForgotPasswordModal({ open, onClose, prefersDarkMode }) {
     setError('');
     setLoading(true);
     try {
-      const res = await axios.post(API + '/forgot-password', { email: form.email.trim() });
+      const res = await axios.post(
+        API + '/forgot-password',
+        { email: form.email.trim() },
+        { timeout: EMAIL_REQUEST_TIMEOUT_MS }
+      );
       setForm((prev) => ({ ...prev, email: (res.data.email || prev.email).trim().toLowerCase() }));
       setStep(2);
       toast.success(res.data.message || 'Reset code sent.');
     } catch (err) {
-      setError(err.response?.data?.error || 'Could not send reset code.');
+      setError(
+        err.code === 'ECONNABORTED'
+          ? 'The request timed out. Please try again in a moment.'
+          : (err.response?.data?.error || 'Could not send reset code.')
+      );
     } finally {
       setLoading(false);
     }
@@ -3070,7 +3079,11 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
       const payload = isRegister
         ? { username: formData.username, email: formData.email, password: formData.password }
         : { identifier: formData.identifier, password: formData.password };
-      const res = await axios.post(API + endpoint, payload);
+      const res = await axios.post(
+        API + endpoint,
+        payload,
+        isRegister ? { timeout: EMAIL_REQUEST_TIMEOUT_MS } : undefined
+      );
       if (res.data.success) {
         if (!isRegister) {
           toast.success('Welcome back.');
@@ -3085,7 +3098,9 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
       }
     } catch (e) {
       const apiError = e.response?.data;
-      const message = apiError?.error || 'Something went wrong. Please try again.';
+      const message = e.code === 'ECONNABORTED'
+        ? 'The request timed out. Please try again in a moment.'
+        : (apiError?.error || 'Something went wrong. Please try again.');
       setAuthError(message);
       if (apiError?.requiresVerification) {
         setVerificationEmail(apiError.email || formData.email || formData.identifier);
@@ -3118,12 +3133,18 @@ function LoginPage({ onLogin, currentUser, prefersDarkMode }) {
     setAuthError('');
     setIsSubmitting(true);
     try {
-      const res = await axios.post(API + '/resend-verification', {
-        email: verificationEmail.trim().toLowerCase(),
-      });
+      const res = await axios.post(
+        API + '/resend-verification',
+        { email: verificationEmail.trim().toLowerCase() },
+        { timeout: EMAIL_REQUEST_TIMEOUT_MS }
+      );
       toast.success(res.data.message || 'A new verification code was sent.');
     } catch (e) {
-      setAuthError(e.response?.data?.error || 'Could not resend verification code.');
+      setAuthError(
+        e.code === 'ECONNABORTED'
+          ? 'The request timed out. Please try again in a moment.'
+          : (e.response?.data?.error || 'Could not resend verification code.')
+      );
     } finally {
       setIsSubmitting(false);
     }
