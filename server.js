@@ -2522,7 +2522,7 @@ app.get('/api/notifications/count', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = process.env.PORT || 7860;
+const PORT = process.env.PORT || 8080;
 cleanupExpiredStories()
     .then((removedCount) => {
         if (removedCount > 0) {
@@ -2536,4 +2536,6 @@ setInterval(() => {
         console.error('Scheduled story cleanup failed:', error.message);
     });
 }, STORY_CLEANUP_INTERVAL_MS);
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+});
