@@ -12,7 +12,8 @@ import {
 import Cropper from 'react-easy-crop';
 import { io as socketIO } from 'socket.io-client';
 
-const API = "http://localhost:8080/api";
+const BACKEND_ORIGIN = "https://abdullahnaeemrao-insta-backend.hf.space";
+const API = `${BACKEND_ORIGIN}/api`;
 const SocketContext = createContext(null);
 
 function ProtectedRoute({ user, isAuthChecking, children }) {
@@ -198,7 +199,7 @@ export default function App() {
     }
     const token = localStorage.getItem('token');
     if (!token || socketRef.current) return;
-    const s = socketIO('http://localhost:8080', { auth: { token } });
+    const s = socketIO(BACKEND_ORIGIN, { auth: { token } });
     s.on('connect', () => console.log('Socket connected'));
     s.on('notification_update', () => fetchNotifCounts());
     socketRef.current = s;
