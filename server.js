@@ -14,9 +14,14 @@ const { sendEmail } = require('./email');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const FRONTEND_ORIGIN = 'https://instagram-clone-sable-gamma.vercel.app';
+const corsOptions = {
+    origin: FRONTEND_ORIGIN,
+    credentials: true,
+};
+const io = new Server(server, { cors: corsOptions });
 
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
@@ -2517,7 +2522,7 @@ app.get('/api/notifications/count', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = 8080;
+const PORT = process.env.PORT || 7860;
 cleanupExpiredStories()
     .then((removedCount) => {
         if (removedCount > 0) {

@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev:backend": "node server.js",
     "dev:frontend": "npm --prefix client run dev -- --host 127.0.0.1 --port 5173",
