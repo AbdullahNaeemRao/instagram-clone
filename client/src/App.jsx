@@ -118,6 +118,23 @@ async function triggerPostShare(postId) {
   return { shareUrl, method: 'clipboard' };
 }
 
+const APP_POST_CREATED_EVENT = 'app:post-created';
+const APP_POST_DELETED_EVENT = 'app:post-deleted';
+const APP_USER_UPDATED_EVENT = 'app:user-updated';
+
+function dispatchAppEvent(name, detail = {}) {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+function updatePostInList(list, postId, updates) {
+  return list.map((item) => (item.id === postId ? { ...item, ...updates } : item));
+}
+
+function removePostFromList(list, postId) {
+  return list.filter((item) => item.id !== postId);
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -215,6 +232,19 @@ export default function App() {
     return () => clearInterval(iv);
   }, [user, fetchNotifCounts]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleUserUpdated = (event) => {
+      const nextUser = event.detail?.user;
+      if (!nextUser) return;
+      setUser((prev) => ({ ...(prev || {}), ...nextUser }));
+    };
+
+    window.addEventListener(APP_USER_UPDATED_EVENT, handleUserUpdated);
+    return () => window.removeEventListener(APP_USER_UPDATED_EVENT, handleUserUpdated);
+  }, []);
+
   const handleLogin = (userData, token) => {
     localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(userData));
@@ -292,7 +322,7 @@ export default function App() {
           </div>
         )}
 
-        {isUploadOpen && <UploadModal onClose={() => setIsUploadOpen(false)} onSuccess={() => { setIsUploadOpen(false); window.location.reload(); }} />}
+        {isUploadOpen && <UploadModal onClose={() => setIsUploadOpen(false)} onSuccess={() => { setIsUploadOpen(false); dispatchAppEvent(APP_POST_CREATED_EVENT); }} />}
         {isActivityOpen && <ActivityModal onClose={() => { setIsActivityOpen(false); fetchNotifCounts(); }} />}
 
         <main className="flex-1 w-full mx-auto">
@@ -1126,9 +1156,26 @@ function Feed() {
     setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current);
   };
 
+  const handlePostDelete = (postId) => {
+    setPosts(prev => removePostFromList(prev, postId));
+    setSelectedPost(current => current && current.id === postId ? null : current);
+  };
+
   useEffect(() => {
     fetchStories();
     refreshFeed();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleDeleted = (event) => {
+      const postId = event.detail?.postId;
+      if (postId) handlePostDelete(postId);
+    };
+
+    window.addEventListener(APP_POST_DELETED_EVENT, handleDeleted);
+    return () => window.removeEventListener(APP_POST_DELETED_EVENT, handleDeleted);
   }, []);
   const myStories = currentUser && groupedStories[currentUser.username] ? groupedStories[currentUser.username] : [];
 
@@ -1194,6 +1241,7 @@ function Feed() {
           onInterestChange={handleInterestChange}
           onRecommendationSignal={handleRecommendationSignal}
           onPostUpdate={handlePostUpdate}
+          onPostDelete={handlePostDelete}
         />
       )}
       {selectedStoryGroup && <StoryViewer stories={selectedStoryGroup} onClose={() => setSelectedStoryGroup(null)} />}
@@ -1257,7 +1305,12 @@ function StoryViewer({ stories, onClose }) {
   const goPrev = (e) => { e.stopPropagation(); if (currentIndex > 0) setCurrentIndex(c => c - 1); };
   const deleteStory = async (e) => {
     e.stopPropagation(); if (!confirm('Delete this story?')) return;
-    try { const token = localStorage.getItem('token'); await axios.delete(API + '/stories/' + story.id, { headers: { Authorization: 'Bearer ' + token } }); onClose(); window.location.reload(); } catch (e) { /* */ }
+    try {
+      const token = localStorage.getItem('token');
+      await axios.delete(API + '/stories/' + story.id, { headers: { Authorization: 'Bearer ' + token } });
+      onClose();
+      toast.success('Story deleted');
+    } catch (e) { /* */ }
   };
   const toggleStoryLike = async (e) => {
     e.stopPropagation();
@@ -1455,7 +1508,7 @@ function CommentItem({ comment, currentUserId, isPostOwner, onDelete, onReply, o
 }
 
 /* ========== POST MODAL ========== */
-function PostModal({ post, onClose, onInterestChange, onRecommendationSignal, onPostUpdate }) {
+function PostModal({ post, onClose, onInterestChange, onRecommendationSignal, onPostUpdate, onPostDelete }) {
   const navigate = useNavigate();
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState('');
@@ -1548,7 +1601,19 @@ function PostModal({ post, onClose, onInterestChange, onRecommendationSignal, on
       }
     }
   };
-  const deletePost = async () => { if (!confirm('Delete?')) return; try { const token = localStorage.getItem('token'); await axios.delete(API + '/posts/' + post.id, { headers: { Authorization: 'Bearer ' + token } }); onClose(); window.location.reload(); } catch (e) { /* */ } };
+  const deletePost = async () => {
+    if (!confirm('Delete?')) return;
+    try {
+      const token = localStorage.getItem('token');
+      await axios.delete(API + '/posts/' + post.id, { headers: { Authorization: 'Bearer ' + token } });
+      onPostDelete?.(post.id);
+      dispatchAppEvent(APP_POST_DELETED_EVENT, { postId: post.id });
+      onClose();
+      toast.success('Post deleted');
+    } catch (e) {
+      toast.error('Could not delete post');
+    }
+  };
   const handleReply = (comment) => { setReplyTarget({ id: comment.id, username: comment.username, text: comment.text }); inputRef.current?.focus(); };
   const updateInterest = async (feedback) => {
     try {
@@ -1903,9 +1968,9 @@ function UploadModal({ onClose, onSuccess }) {
     try {
       setLoading(true);
       const token = localStorage.getItem('token');
-      await axios.post(API + '/posts', fd, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'multipart/form-data' } });
+      const res = await axios.post(API + '/posts', fd, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'multipart/form-data' } });
       toast.success('Shared');
-      onSuccess();
+      onSuccess?.(res.data);
     } catch (e) { toast.error('Failed'); } finally { setLoading(false); }
   };
   return (
@@ -2237,13 +2302,20 @@ function PublicProfile({ currentUser }) {
   const navigate = useNavigate();
   const isMe = currentUser.username === profileData?.user?.username;
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true); setActiveTab('posts');
-      try { const token = localStorage.getItem('token'); const res = await axios.get(API + '/users/' + username, { headers: { Authorization: 'Bearer ' + token } }); setProfileData(res.data); } catch (e) { /* */ }
-      finally { setLoading(false); }
-    })();
+  const fetchProfile = useCallback(async ({ resetTab = false } = {}) => {
+    setLoading(true);
+    if (resetTab) setActiveTab('posts');
+    try {
+      const token = localStorage.getItem('token');
+      const res = await axios.get(API + '/users/' + username, { headers: { Authorization: 'Bearer ' + token } });
+      setProfileData(res.data);
+    } catch (e) { /* */ }
+    finally { setLoading(false); }
   }, [username]);
+
+  useEffect(() => {
+    fetchProfile({ resetTab: true });
+  }, [fetchProfile]);
 
   useEffect(() => {
     if (activeTab !== 'saved') return;
@@ -2301,7 +2373,15 @@ function PublicProfile({ currentUser }) {
   const onFileSelect = (e) => { if (e.target.files?.length > 0) { const r = new FileReader(); r.readAsDataURL(e.target.files[0]); r.onload = () => { setImageToCrop(r.result); setIsMenuOpen(false); }; } };
   const onCropComplete = async (blob) => { setImageToCrop(null); const fd = new FormData(); fd.append('image', blob); try { const token = localStorage.getItem('token'); const res = await axios.put(API + '/users/avatar', fd, { headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'multipart/form-data' } }); updateLocalUser(res.data.profile_pic); toast.success('Updated'); } catch (e) { toast.error('Error'); } };
   const onRemovePhoto = async () => { if (!confirm('Remove?')) return; try { const token = localStorage.getItem('token'); await axios.delete(API + '/users/avatar', { headers: { Authorization: 'Bearer ' + token } }); updateLocalUser(null); setIsMenuOpen(false); toast.success('Removed'); } catch (e) { toast.error('Error'); } };
-  const updateLocalUser = (newPic) => { setProfileData(prev => ({ ...prev, user: { ...prev.user, profile_pic: newPic } })); const su = JSON.parse(localStorage.getItem('user')); su.profile_pic = newPic; localStorage.setItem('user', JSON.stringify(su)); window.location.reload(); };
+  const updateLocalUser = (newPic) => {
+    setProfileData(prev => ({ ...prev, user: { ...prev.user, profile_pic: newPic } }));
+    const savedUser = JSON.parse(localStorage.getItem('user') || 'null');
+    if (savedUser) {
+      const nextUser = { ...savedUser, profile_pic: newPic };
+      localStorage.setItem('user', JSON.stringify(nextUser));
+      dispatchAppEvent(APP_USER_UPDATED_EVENT, { user: nextUser });
+    }
+  };
 
   const toggleFollow = async () => {
     try {
@@ -2372,6 +2452,50 @@ function PublicProfile({ currentUser }) {
       toast.error('Could not delete comment');
     }
   };
+
+  const handlePostUpdate = (postId, updates) => {
+    setProfileData(prev => prev ? ({ ...prev, posts: updatePostInList(prev.posts, postId, updates) }) : prev);
+    setSavedPosts(prev => updatePostInList(prev, postId, updates));
+    setLikedPosts(prev => updatePostInList(prev, postId, updates));
+    setCommentedPosts(prev => updatePostInList(prev, postId, updates));
+    setPreferencePosts(prev => ({
+      interested: updatePostInList(prev.interested, postId, updates),
+      not_interested: updatePostInList(prev.not_interested, postId, updates),
+    }));
+    setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current);
+  };
+
+  const handlePostDelete = (postId) => {
+    setProfileData(prev => prev ? ({ ...prev, posts: removePostFromList(prev.posts, postId) }) : prev);
+    setSavedPosts(prev => removePostFromList(prev, postId));
+    setLikedPosts(prev => removePostFromList(prev, postId));
+    setCommentedPosts(prev => removePostFromList(prev, postId));
+    setPreferencePosts(prev => ({
+      interested: removePostFromList(prev.interested, postId),
+      not_interested: removePostFromList(prev.not_interested, postId),
+    }));
+    setSelectedPost(current => current && current.id === postId ? null : current);
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleCreated = () => {
+      if (isMe) fetchProfile();
+    };
+
+    const handleDeleted = (event) => {
+      const postId = event.detail?.postId;
+      if (postId) handlePostDelete(postId);
+    };
+
+    window.addEventListener(APP_POST_CREATED_EVENT, handleCreated);
+    window.addEventListener(APP_POST_DELETED_EVENT, handleDeleted);
+    return () => {
+      window.removeEventListener(APP_POST_CREATED_EVENT, handleCreated);
+      window.removeEventListener(APP_POST_DELETED_EVENT, handleDeleted);
+    };
+  }, [fetchProfile, isMe]);
 
   if (loading) return <div className="p-10 text-center text-sm">Loading...</div>;
   if (!profileData) return <div className="p-10 text-center text-red-500 text-sm">User not found</div>;
@@ -2532,7 +2656,7 @@ function PublicProfile({ currentUser }) {
         </>
       )}
 
-      {selectedPost && <PostModal post={selectedPost} onClose={() => { setSelectedPost(null); if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); if (activeTab === 'liked' && isMe) fetchInteractionPosts('liked'); if (activeTab === 'commented' && isMe) fetchInteractionPosts('commented'); }} onInterestChange={() => { if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); }} onPostUpdate={(postId, updates) => setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current)} />}
+      {selectedPost && <PostModal post={selectedPost} onClose={() => { setSelectedPost(null); if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); if (activeTab === 'liked' && isMe) fetchInteractionPosts('liked'); if (activeTab === 'commented' && isMe) fetchInteractionPosts('commented'); }} onInterestChange={() => { if (activeTab === 'preferences' && isMe) fetchPreferencePosts(); }} onPostUpdate={handlePostUpdate} onPostDelete={handlePostDelete} />}
       {showUserList && <UserListModal userId={profileData.user.id} type={showUserList} onClose={() => setShowUserList(null)} isOwnProfile={isMe} onFollowerRemoved={() => setProfileData(prev => ({ ...prev, user: { ...prev.user, followers_count: Math.max(0, parseInt(prev.user.followers_count) - 1) } }))} onFollowingRemoved={() => setProfileData(prev => ({ ...prev, user: { ...prev.user, following_count: Math.max(0, parseInt(prev.user.following_count) - 1) } }))} />}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} isPrivate={profileData.user.is_private} followerCount={profileData.user.followers_count} onTogglePrivacy={() => togglePrivacy()} onManageFollowers={() => { setShowSettings(false); setShowUserList('followers'); }} />}
     </div>
@@ -2591,11 +2715,28 @@ function SearchPage({ currentUser }) {
     setSelectedPost(current => current && current.id === postId ? { ...current, ...updates } : current);
   };
 
+  const handlePostDelete = (postId) => {
+    setExplorePosts(prev => removePostFromList(prev, postId));
+    setSelectedPost(current => current && current.id === postId ? null : current);
+  };
+
   const handleRecommendationSignal = () => {
     refreshExplore();
   };
 
   useEffect(() => { refreshExplore(); }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleDeleted = (event) => {
+      const postId = event.detail?.postId;
+      if (postId) handlePostDelete(postId);
+    };
+
+    window.addEventListener(APP_POST_DELETED_EVENT, handleDeleted);
+    return () => window.removeEventListener(APP_POST_DELETED_EVENT, handleDeleted);
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(async () => {
@@ -2665,6 +2806,7 @@ function SearchPage({ currentUser }) {
           onInterestChange={handleInterestChange}
           onRecommendationSignal={handleRecommendationSignal}
           onPostUpdate={handlePostUpdate}
+          onPostDelete={handlePostDelete}
         />
       )}
     </div>
@@ -2724,6 +2866,7 @@ function PostPermalinkPage() {
       onClose={closePermalink}
       onInterestChange={(id, feedback) => { if (feedback === 'not_interested') closePermalink(); }}
       onPostUpdate={(id, updates) => setPost(current => current && current.id === id ? { ...current, ...updates } : current)}
+      onPostDelete={() => closePermalink()}
     />
   );
 }
